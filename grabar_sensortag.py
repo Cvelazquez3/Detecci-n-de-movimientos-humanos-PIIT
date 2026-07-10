@@ -7,8 +7,8 @@ MOV_DATA = "f000aa81-0451-4000-b000-000000000000"
 MOV_CONF = "f000aa82-0451-4000-b000-000000000000"
 MOV_PERI = "f000aa83-0451-4000-b000-000000000000"
 
-NOMBRE_ARCHIVO = "Prueba.csv"
-N_MUESTRAS     = 200
+NOMBRE_ARCHIVO = "Grabacion_8h.csv"
+N_MUESTRAS     = 288030  # 8 horas a 10Hz (288000 muestras) + 30 muestras de calibracion
 N_CALIBRACION  = 30  # 3 segundos a 10Hz para calibrar orientacion
 
 datos = []
@@ -46,8 +46,12 @@ def callback_sensores(sender, raw):
     else:
         muestras_movimiento = n - N_CALIBRACION
         total_movimiento    = N_MUESTRAS - N_CALIBRACION
-        if muestras_movimiento % 20 == 0:
-            print(f"  Grabando movimiento: {muestras_movimiento}/{total_movimiento} muestras")
+        muestras_restantes  = N_MUESTRAS - n
+        segundos_restantes  = muestras_restantes / 10.0
+        horas = int(segundos_restantes // 3600)
+        minutos = int((segundos_restantes % 3600) // 60)
+        segundos = int(segundos_restantes % 60)
+        print(f"\r  Grabando: {muestras_movimiento}/{total_movimiento} muestras | Tiempo restante: {horas:02d}:{minutos:02d}:{segundos:02d}", end="", flush=True)
 
 async def grabar():
     global datos, fase_calibracion
