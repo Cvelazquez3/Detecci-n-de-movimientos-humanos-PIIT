@@ -47,6 +47,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const btnRecord = document.getElementById("btn-record");
     const recStatus = document.getElementById("rec-status");
     const recCount = document.getElementById("rec-count");
+    const recCountdown = document.getElementById("rec-countdown");
+    const btnDownloadExcel = document.getElementById("btn-download-excel");
+    const RECORDING_DURATION_S = 60; // Duracion de grabacion en segundos
+    let recordingTimer = null;
     
     const csvSelect = document.getElementById("csv-select");
     const btnRefreshCsv = document.getElementById("btn-refresh-csv");
@@ -689,16 +693,55 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ filename })
             })
             .then(res => res.json())
-            .then(() => checkServerStatus());
+            .then(() => {
+                checkServerStatus();
+                btnDownloadExcel.classList.add("hidden");
+                // Iniciar cuenta regresiva visual
+                let secondsLeft = RECORDING_DURATION_S;
+                recCountdown.textContent = `${secondsLeft}s`;
+                recCountdown.classList.remove("hidden");
+                recordingTimer = setInterval(() => {
+                    secondsLeft--;
+                    recCountdown.textContent = `${secondsLeft}s`;
+                    if (secondsLeft <= 0) {
+                        clearInterval(recordingTimer);
+                        recordingTimer = null;
+                        // Auto-detener grabación
+                        stopRecordingAndSave();
+                    }
+                }, 1000);
+            });
         } else {
-            // Detener grabación
-            fetch("/api/stop_recording", { method: "POST" })
-                .then(res => res.json())
-                .then(data => {
-                    alert(`Archivo guardado con éxito: ${data.filename}\nMuestras grabadas: ${data.samples}\nDuración: ${data.duration.toFixed(1)} segundos`);
-                    checkServerStatus();
-                    loadCsvFilesList(); // refrescar lista de CSVs
-                });
+            // Detener grabación manualmente
+            if (recordingTimer) { clearInterval(recordingTimer); recordingTimer = null; }
+            recCountdown.classList.add("hidden");
+            stopRecordingAndSave();
+        }
+    });
+
+    function stopRecordingAndSave() {
+        fetch("/api/stop_recording", { method: "POST" })
+            .then(res => res.json())
+            .then(data => {
+                recCountdown.classList.add("hidden");
+                if (data.samples > 0) {
+                    // Mostrar botón de descarga Excel
+                    btnDownloadExcel.classList.remove("hidden");
+                    btnDownloadExcel.dataset.filename = data.filename;
+                    alert(`✅ Grabación completada\nArchivo CSV: ${data.filename}\nMuestras: ${data.samples}\nDuración: ${data.duration.toFixed(1)} s`);
+                } else {
+                    alert("No se capturaron muestras.");
+                }
+                checkServerStatus();
+                loadCsvFilesList();
+            });
+    }
+
+    // Botón de descarga Excel
+    btnDownloadExcel.addEventListener("click", () => {
+        const filename = btnDownloadExcel.dataset.filename;
+        if (filename) {
+            window.location.href = `/api/download_excel/${encodeURIComponent(filename)}`;
         }
     });
 

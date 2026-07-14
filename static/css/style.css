@@ -364,6 +364,38 @@ body {
     display: none !important;
 }
 
+.btn-excel {
+    background: linear-gradient(135deg, #1d7a3e, #217346);
+    color: white;
+    margin-top: 8px;
+    width: 100%;
+    border: 1px solid rgba(255,255,255,0.1);
+    animation: fadeIn 0.3s ease;
+}
+
+.btn-excel:hover:not(:disabled) {
+    background: linear-gradient(135deg, #26af5f, #1d7a3e);
+    box-shadow: 0 4px 12px rgba(33, 115, 70, 0.4);
+}
+
+.rec-countdown-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, #ff4757, #c0392b);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    padding: 2px 8px;
+    border-radius: 10px;
+    letter-spacing: 0.5px;
+    vertical-align: middle;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
 .btn-icon {
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.05);

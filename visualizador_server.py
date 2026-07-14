@@ -8,8 +8,9 @@ import queue
 import threading
 import asyncio
 import webbrowser
+import io
 import pandas as pd
-from flask import Flask, Response, render_template, jsonify, request
+from flask import Flask, Response, render_template, jsonify, request, send_file
 
 # SensorTag GATT UUIDs
 MOV_DATA = "f000aa81-0451-4000-b000-000000000000"
@@ -339,8 +340,68 @@ def stop_recording():
         "samples": samples,
         "duration": duration
     })
+@app.route('/api/download_excel/<path:filename>')
+def download_excel(filename):
+    """Convierte un CSV grabado a Excel con columnas organizadas por eje."""
+    if not filename.endswith('.csv') or '..' in filename:
+        return jsonify({"error": "Nombre de archivo invalido"}), 400
 
-# Stream SSE
+    filepath = os.path.join(WORKSPACE_DIR, filename)
+    if not os.path.exists(filepath):
+        return jsonify({"error": "Archivo no encontrado"}), 404
+
+    try:
+        df = pd.read_csv(filepath)
+
+        # Reconstruir timestamp si no existe
+        if 'timestamp' not in df.columns:
+            df.insert(0, 'Tiempo (s)', [round(i * 0.1, 1) for i in range(len(df))])
+        else:
+            df.insert(0, 'Tiempo (s)', df['timestamp'].round(3))
+
+        # Organizar columnas por eje
+        col_map = {
+            'acc_x':  'Acc X (g)',
+            'acc_y':  'Acc Y (g)',
+            'acc_z':  'Acc Z (g)',
+            'gyr_x':  'Gyr α (rad/s)',
+            'gyr_y':  'Gyr β (rad/s)',
+            'gyr_z':  'Gyr γ (rad/s)',
+        }
+        columnas_export = ['Tiempo (s)']
+        for src, dst in col_map.items():
+            if src in df.columns:
+                df[dst] = df[src].round(6)
+                columnas_export.append(dst)
+
+        df_export = df[columnas_export]
+
+        # Generar Excel en memoria
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_export.to_excel(writer, index=False, sheet_name='IMU Data')
+
+            ws = writer.sheets['IMU Data']
+
+            # Anchos de columna
+            col_widths = {'Tiempo (s)': 12, 'Acc X (g)': 14, 'Acc Y (g)': 14, 'Acc Z (g)': 14,
+                          'Gyr α (rad/s)': 16, 'Gyr β (rad/s)': 16, 'Gyr γ (rad/s)': 16}
+            for i, col_name in enumerate(columnas_export, 1):
+                ws.column_dimensions[ws.cell(1, i).column_letter].width = col_widths.get(col_name, 14)
+
+        output.seek(0)
+        excel_filename = filename.replace('.csv', '.xlsx')
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=excel_filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/stream')
 def stream_data():
     def event_stream():

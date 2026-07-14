@@ -61,15 +61,20 @@
                 </div>
 
                 <div class="rec-section card-dark">
-                    <h4><i class="fa-solid fa-circle-dot text-danger"></i> Grabar en CSV</h4>
+                    <h4><i class="fa-solid fa-circle-dot text-danger"></i> Grabar (60 seg)</h4>
                     <input type="text" id="rec-filename" placeholder="Nombre_Archivo.csv" value="Prueba_Nueva.csv">
                     <button id="btn-record" class="btn btn-success" disabled>
-                        <i class="fa-solid fa-play"></i> Grabar Muestras
+                        <i class="fa-solid fa-play"></i> Iniciar Grabación
                     </button>
                     <div id="rec-status" class="hidden">
                         <span class="pulse-rec"><i class="fa-solid fa-circle"></i> GRABANDO</span>
                         <span id="rec-count">0</span> muestras
+                        &nbsp;&nbsp;
+                        <span id="rec-countdown" class="rec-countdown-badge hidden">60s</span>
                     </div>
+                    <button id="btn-download-excel" class="btn btn-excel hidden">
+                        <i class="fa-solid fa-file-excel"></i> Descargar Excel
+                    </button>
                 </div>
             </div>
             
