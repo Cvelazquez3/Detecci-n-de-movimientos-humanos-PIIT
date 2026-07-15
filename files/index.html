@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizador IMU PIIT - Caracterización de Deriva</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome para iconos -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Archivo CSS local -->
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Barra lateral -->
+        <aside class="sidebar">
+            <div class="logo">
+                <i class="fa-solid fa-cube logo-icon"></i>
+                <div class="logo-text">
+                    <h1>IMU Visualizer</h1>
+                    <span>PIIT - Deriva & Trayectoria</span>
+                </div>
+            </div>
+            
+            <nav class="nav-menu">
+                <button class="nav-btn active" data-tab="dashboard">
+                    <i class="fa-solid fa-gauge"></i> Dashboard & 3D
+                </button>
+                <button class="nav-btn" data-tab="charts">
+                    <i class="fa-solid fa-chart-line"></i> Gráficos de Señales
+                </button>
+                <button class="nav-btn" data-tab="drift">
+                    <i class="fa-solid fa-compass-drafting"></i> Análisis de Deriva
+                </button>
+            </nav>
+
+            <!-- Conexión y Control del Sensor -->
+            <div class="control-panel">
+                <h3><i class="fa-solid fa-rss"></i> SensorTag BLE</h3>
+                <div class="status-indicator">
+                    <span class="status-dot disconnected" id="ble-status-dot"></span>
+                    <span id="ble-status-text">Desconectado</span>
+                </div>
+
+                <!-- Selector de frecuencia de muestreo. Solo editable mientras no
+                     hay una fuente activa (se bloquea al conectar o simular). -->
+                <div class="freq-selector-wrapper">
+                    <label class="freq-selector-label">Frecuencia de muestreo</label>
+                    <div class="freq-selector" id="freq-selector">
+                        <button type="button" class="freq-btn active" data-freq="10">10 Hz</button>
+                        <button type="button" class="freq-btn" data-freq="50">50 Hz</button>
+                    </div>
+                    <div class="freq-hint" id="freq-hint">
+                        10Hz es el máximo documentado por TI para el firmware de fábrica del CC2650.
+                    </div>
+                    <div class="freq-live-badge hidden" id="freq-live-badge">
+                        Fs objetivo: <span id="freq-target-val">--</span> Hz &nbsp;|&nbsp;
+                        Fs real: <span id="freq-actual-val">--</span> Hz
+                    </div>
+                    <div class="freq-warning hidden" id="freq-warning-box">
+                        <i class="fa-solid fa-triangle-exclamation"></i>
+                        <span id="freq-warning-text"></span>
+                    </div>
+                </div>
+
+                <div class="btn-group-vertical">
+                    <button id="btn-connect" class="btn btn-primary">
+                        <i class="fa-solid fa-link"></i> Conectar SensorTag
+                    </button>
+                    <button id="btn-disconnect" class="btn btn-danger hidden">
+                        <i class="fa-solid fa-link-slash"></i> Desconectar
+                    </button>
+                    <button id="btn-simulate" class="btn btn-secondary">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> Simular SensorTag
+                    </button>
+                    <button id="btn-stop-simulate" class="btn btn-danger hidden">
+                        <i class="fa-solid fa-ban"></i> Detener Simulación
+                    </button>
+                </div>
+
+                <div class="rec-section card-dark">
+                    <h4><i class="fa-solid fa-circle-dot text-danger"></i> Grabar (60 seg)</h4>
+                    <input type="text" id="rec-filename" placeholder="Nombre_Archivo.csv" value="Prueba_Nueva.csv">
+                    <button id="btn-record" class="btn btn-success" disabled>
+                        <i class="fa-solid fa-play"></i> Iniciar Grabación
+                    </button>
+                    <div id="rec-status" class="hidden">
+                        <span class="pulse-rec"><i class="fa-solid fa-circle"></i> GRABANDO</span>
+                        <span id="rec-count">0</span> muestras
+                        &nbsp;&nbsp;
+                        <span id="rec-countdown" class="rec-countdown-badge hidden">60s</span>
+                    </div>
+                    <button id="btn-download-excel" class="btn btn-excel hidden">
+                        <i class="fa-solid fa-file-excel"></i> Descargar Excel
+                    </button>
+                </div>
+            </div>
+            
+            <div class="footer-info">
+                <p>PIIT 2026 - Reconstrucción de Trayectoria</p>
+            </div>
+        </aside>
+
+        <!-- Contenido principal -->
+        <main class="main-content">
+            
+            <!-- Vista 1: Dashboard y 3D -->
+            <section id="tab-dashboard" class="tab-content active">
+                <div class="grid-layout">
+                    <!-- Fila Superior: Playback de CSV y Selección -->
+                    <div class="card col-12 playback-card">
+                        <div class="playback-header">
+                            <h2><i class="fa-solid fa-folder-open text-primary"></i> Reproducción de Ensayos CSV</h2>
+                            <div class="csv-selector-wrapper">
+                                <label for="csv-select">Seleccionar Ensayo:</label>
+                                <select id="csv-select">
+                                    <option value="">Cargando archivos...</option>
+                                </select>
+                                <label for="csv-fs-select" class="csv-fs-label">Fs grabación:</label>
+                                <select id="csv-fs-select" title="Frecuencia con la que se grabó este archivo (los CSV crudos no guardan esta información)">
+                                    <option value="10" selected>10 Hz</option>
+                                    <option value="50">50 Hz</option>
+                                </select>
+                                <button id="btn-refresh-csv" class="btn-icon"><i class="fa-solid fa-arrows-rotate"></i></button>
+                            </div>
+                        </div>
+                        <div class="playback-controls hidden" id="playback-controls-bar">
+                            <button id="btn-play" class="btn-play-pause"><i class="fa-solid fa-play"></i></button>
+                            <div class="scrubber-container">
+                                <span id="time-current">0.0s</span>
+                                <input type="range" id="playback-scrubber" min="0" max="100" value="0">
+                                <span id="time-total">0.0s</span>
+                            </div>
+                            <div class="speed-control">
+                                <label for="speed-select">Velocidad:</label>
+                                <select id="speed-select">
+                                    <option value="0.5">0.5x</option>
+                                    <option value="1.0" selected>1.0x</option>
+                                    <option value="2.0">2.0x</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Fila Central Izquierda: Render 3D de Orientación -->
+                    <div class="card col-7 visualizer-3d-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-cube text-accent"></i> Orientación del Sensor en 3D</h3>
+                            <div class="sensor-mode-badge" id="source-badge">Modo: Esperando Datos</div>
+                        </div>
+                        <div id="three-container" class="canvas-3d-container">
+                            <!-- Aquí se inyecta la escena Three.js -->
+                            <div class="three-legend">
+                                <span class="axis-legend axis-x"><span class="color-box"></span>Eje X (Roll)</span>
+                                <span class="axis-legend axis-y"><span class="color-box"></span>Eje Y (Pitch)</span>
+                                <span class="axis-legend axis-z"><span class="color-box"></span>Eje Z (Yaw)</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Fila Central Derecha: Lecturas numéricas instantáneas -->
+                    <div class="card col-5 telemetry-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-microchip"></i> Telemetría del Sensor</h3>
+                        </div>
+                        
+                        <div class="telemetry-section">
+                            <h4>Acelerómetro (g)</h4>
+                            <div class="telemetry-grid">
+                                <div class="telemetry-item axis-x">
+                                    <span class="label">Acc X</span>
+                                    <span class="value" id="val-ax">0.000</span>
+                                    <div class="bar-container"><div class="bar" id="bar-ax"></div></div>
+                                </div>
+                                <div class="telemetry-item axis-y">
+                                    <span class="label">Acc Y</span>
+                                    <span class="value" id="val-ay">0.000</span>
+                                    <div class="bar-container"><div class="bar" id="bar-ay"></div></div>
+                                </div>
+                                <div class="telemetry-item axis-z">
+                                    <span class="label">Acc Z</span>
+                                    <span class="value" id="val-az">0.000</span>
+                                    <div class="bar-container"><div class="bar" id="bar-az"></div></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="telemetry-section">
+                            <h4>Giroscopio (rad/s)</h4>
+                            <div class="telemetry-grid">
+                                <div class="telemetry-item axis-x">
+                                    <span class="label">&alpha;</span>
+                                    <span class="value" id="val-gx">0.000</span>
+                                    <div class="bar-container"><div class="bar" id="bar-gx"></div></div>
+                                </div>
+                                <div class="telemetry-item axis-y">
+                                    <span class="label">&beta;</span>
+                                    <span class="value" id="val-gy">0.000</span>
+                                    <div class="bar-container"><div class="bar" id="bar-gy"></div></div>
+                                </div>
+                                <div class="telemetry-item axis-z">
+                                    <span class="label">&gamma;</span>
+                                    <span class="value" id="val-gz">0.000</span>
+                                    <div class="bar-container"><div class="bar" id="bar-gz"></div></div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="telemetry-section">
+                            <h4>Ángulos Estimados (Filtro Complementario)</h4>
+                            <div class="euler-grid">
+                                <div class="euler-item">
+                                    <span class="label">Roll (X)</span>
+                                    <span class="value" id="val-roll">0.0°</span>
+                                </div>
+                                <div class="euler-item">
+                                    <span class="label">Pitch (Y)</span>
+                                    <span class="value" id="val-pitch">0.0°</span>
+                                </div>
+                                <div class="euler-item">
+                                    <span class="label">Yaw (Z)</span>
+                                    <span class="value text-muted" id="val-yaw">0.0°</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Vista 2: Gráficos de Señales -->
+            <section id="tab-charts" class="tab-content">
+                <div class="grid-layout">
+                    <!-- Gráfico del Acelerómetro -->
+                    <div class="card col-12 chart-card">
+                        <div class="chart-header">
+                            <h3><i class="fa-solid fa-wave-square text-primary"></i> Aceleración Lineal ($a_x$, $a_y$, $a_z$) en g</h3>
+                            <div class="chart-actions">
+                                <span class="badge badge-x">X</span>
+                                <span class="badge badge-y">Y</span>
+                                <span class="badge badge-z">Z</span>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chart-acc"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Gráfico del Giroscopio -->
+                    <div class="card col-12 chart-card">
+                        <div class="chart-header">
+                            <h3><i class="fa-solid fa-arrows-spin text-success"></i> Velocidad Angular (&alpha;, &beta;, &gamma;) en rad/s</h3>
+                            <div class="chart-actions">
+                                <span class="badge badge-x">&alpha;</span>
+                                <span class="badge badge-y">&beta;</span>
+                                <span class="badge badge-z">&gamma;</span>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chart-gyr"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Vista 3: Análisis de Deriva y Fusión de Datos -->
+            <section id="tab-drift" class="tab-content">
+                <div class="grid-layout">
+                    <!-- Controles del Filtro -->
+                    <div class="card col-4 filter-control-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-sliders text-accent"></i> Fusión de Sensores</h3>
+                        </div>
+                        <p class="description">
+                            Compara la orientación estimada combinando el Acelerómetro (estable pero ruidoso a corto plazo) y el Giroscopio (rápido pero con deriva a largo plazo debido al sesgo).
+                        </p>
+                        
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Coeficiente Filtro Complementario (&alpha;)</span>
+                                <strong id="val-alpha">0.98</strong>
+                            </div>
+                            <input type="range" id="filter-alpha" min="0" max="1" step="0.01" value="0.98">
+                            <div class="range-labels">
+                                <span>0.0 (Solo Acel)</span>
+                                <span>1.0 (Solo Giro)</span>
+                            </div>
+                        </div>
+
+                        <div class="bias-calibration-card card-dark">
+                            <h4><i class="fa-solid fa-calculator"></i> Sesgo Estático Estimado</h4>
+                            <p>Promedio de la velocidad angular en reposo:</p>
+                            <table class="bias-table">
+                                <tr>
+                                    <td>Sesgo &alpha;:</td>
+                                    <td id="bias-x-val">0.000 rad/s</td>
+                                </tr>
+                                <tr>
+                                    <td>Sesgo &beta;:</td>
+                                    <td id="bias-y-val">0.000 rad/s</td>
+                                </tr>
+                                <tr>
+                                    <td>Sesgo &gamma;:</td>
+                                    <td id="bias-z-val">0.000 rad/s</td>
+                                </tr>
+                            </table>
+                            <button id="btn-calibrate-bias" class="btn btn-secondary btn-sm" disabled>
+                                <i class="fa-solid fa-arrows-to-dot"></i> Calcular Sesgo en Reposo
+                            </button>
+                        </div>
+                        
+                        <div class="alert-info-box">
+                            <i class="fa-solid fa-circle-info"></i>
+                            <p>
+                                <strong>Deriva (Drift)</strong>: Integra el giroscopio estático para ver cómo los ángulos aumentan sin detenerse. El filtro complementario anula la deriva en Roll y Pitch usando la referencia de la gravedad.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Gráfico Comparativo de Fusión -->
+                    <div class="card col-8 comparison-chart-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-chart-line text-primary"></i> Ángulo de Pitch (Cabeceo): Comparativa de Métodos</h3>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chart-fusion-pitch"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Gráfico de Deriva de Guiñada (Yaw) -->
+                    <div class="card col-12 comparison-chart-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-chart-line text-danger"></i> Ángulo de Yaw (Guiñada) e Integración del Giroscopio Z</h3>
+                            <span class="badge badge-warning">Sin corrección de gravedad en Z</span>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="chart-fusion-yaw"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Scripts CDN obligatorios -->
+    <!-- Three.js para renderizado 3D -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- OrbitControls para rotar la cámara con el ratón -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- Chart.js para gráficos científicos -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Archivo JS local -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
