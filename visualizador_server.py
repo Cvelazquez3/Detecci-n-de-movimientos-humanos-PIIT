@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import time
 import math
 import random
@@ -9,13 +10,34 @@ import threading
 import asyncio
 import webbrowser
 import io
+from collections import deque
 import pandas as pd
+import numpy as np
 from flask import Flask, Response, render_template, jsonify, request, send_file
 
 # SensorTag GATT UUIDs
 MOV_DATA = "f000aa81-0451-4000-b000-000000000000"
 MOV_CONF = "f000aa82-0451-4000-b000-000000000000"
 MOV_PERI = "f000aa83-0451-4000-b000-000000000000"
+
+# ---------------------------------------------------------------------------
+# Frecuencias de muestreo soportadas por la interfaz
+# ---------------------------------------------------------------------------
+# El registro MOV_PERI del CC2650 SensorTag tiene, segun la documentacion
+# oficial de TI, un rango DOCUMENTADO de periodo de 100ms (0x0A) a 2.55s
+# (0xFF), con resolucion de 10ms. Es decir: 10Hz es la frecuencia MAXIMA
+# soportada por el firmware de fabrica. Pedir 50Hz (periodo de 20ms) esta
+# fuera de ese rango: el firmware puede ignorarlo y quedarse en 10Hz. Por
+# eso el sistema SIEMPRE mide la frecuencia real lograda a partir de los
+# timestamps de los paquetes BLE recibidos, y la expone en /api/status
+# como "sample_rate_actual_hz" para que la interfaz pueda avisar si la
+# Fs solicitada no fue honrada por el hardware.
+SAMPLE_RATES = {
+    10: 0x0A,  # 100ms -> dentro del rango documentado por TI
+    50: 0x02,  #  20ms -> fuera del rango documentado por TI
+}
+DEFAULT_FREQ_HZ = 10
+FS_TOLERANCE_HZ = 1.0
 
 WORKSPACE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -32,6 +54,7 @@ class RecordingState:
         self.recorded_data = []
         self.filename = ""
         self.start_time = 0
+        self.freq_hz = DEFAULT_FREQ_HZ  # Fs de la fuente activa al iniciar la grabacion
 
 state = RecordingState()
 
@@ -45,6 +68,10 @@ class BLEManager:
         self.error = None 
         self.loop = None
         self.thread = None
+        self.freq_hz = DEFAULT_FREQ_HZ          # Fs solicitada al SensorTag
+        self._ts_window = deque(maxlen=100)     # timestamps recientes, para medir la Fs real
+        self.actual_hz = None                   # Fs real medida a partir de los timestamps BLE
+        self.freq_warning = None                # aviso si la Fs real no coincide con la solicitada
 
     def start(self):
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -55,9 +82,15 @@ class BLEManager:
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
-    def connect(self):
+    def connect(self, freq_hz=DEFAULT_FREQ_HZ):
         if self.status in ["scanning", "connecting", "connected"]:
             return
+        if freq_hz not in SAMPLE_RATES:
+            freq_hz = DEFAULT_FREQ_HZ
+        self.freq_hz = freq_hz
+        self.actual_hz = None
+        self.freq_warning = None
+        self._ts_window.clear()
         self.status = "scanning"
         self.error = None
         asyncio.run_coroutine_threadsafe(self._connect_coro(), self.loop)
@@ -86,9 +119,14 @@ class BLEManager:
             print(f"[BLE] Conectando a {target.name} ({target.address})...")
             self.client = BleakClient(target)
             await self.client.connect()
-            
-            # Configurar periodo de muestreo a 100ms (10Hz)
-            await self.client.write_gatt_char(MOV_PERI, bytearray([0x0A]))
+
+            # Configurar periodo de muestreo segun la Fs solicitada
+            period_byte = SAMPLE_RATES[self.freq_hz]
+            print(f"[BLE] Solicitando Fs = {self.freq_hz}Hz (periodo = {period_byte * 10}ms)")
+            if self.freq_hz not in (10,):
+                print(f"[BLE] AVISO: {self.freq_hz}Hz esta fuera del rango de periodo documentado por TI "
+                      f"(100ms-2.55s). El SensorTag puede ignorarlo y quedarse en 10Hz. Se medira la Fs real.")
+            await self.client.write_gatt_char(MOV_PERI, bytearray([period_byte]))
             # Habilitar giroscopio (ejes X, Y, Z) y acelerometro (ejes X, Y, Z) -> 0x3F (binario 00111111)
             await self.client.write_gatt_char(MOV_CONF, bytearray([0x3F, 0x00]))
             await asyncio.sleep(1.0)
@@ -135,11 +173,31 @@ class BLEManager:
         ay = int.from_bytes(raw[8:10], "little", signed=True) / 16384.0
         az = int.from_bytes(raw[10:12],"little", signed=True) / 16384.0
 
+        ts_now = time.time()
+
+        # Medir la Fs REAL a partir de los timestamps de llegada (no confiar
+        # ciegamente en el valor escrito en MOV_PERI; el firmware puede
+        # ignorarlo, ver nota al inicio del archivo).
+        self._ts_window.append(ts_now)
+        if len(self._ts_window) >= 10:
+            span = self._ts_window[-1] - self._ts_window[0]
+            if span > 0:
+                self.actual_hz = (len(self._ts_window) - 1) / span
+                if abs(self.actual_hz - self.freq_hz) > FS_TOLERANCE_HZ:
+                    self.freq_warning = (
+                        f"Fs solicitada {self.freq_hz}Hz, pero se esta midiendo "
+                        f"{self.actual_hz:.1f}Hz real (el SensorTag pudo haber "
+                        f"ignorado la configuracion)."
+                    )
+                else:
+                    self.freq_warning = None
+
         payload = {
-            'timestamp': time.time(),
+            'timestamp': ts_now,
             'acc_x': ax, 'acc_y': ay, 'acc_z': az,
             'gyr_x': gx, 'gyr_y': gy, 'gyr_z': gz
         }
+        _agregar_campos_calibrados(payload)
 
         # Guardar en grabacion
         with recording_lock:
@@ -156,17 +214,35 @@ class BLEManager:
 
 ble_manager = BLEManager()
 
+def _agregar_campos_calibrados(payload):
+    """
+    Si hay una calibracion activa (calculada en la pestaña Calibracion) y el
+    usuario activo 'aplicar calibracion en vivo', agrega campos EXTRA
+    (acc_x_cal, acc_y_cal, acc_z_cal, en m/s^2) al payload sin tocar los
+    originales (acc_x, acc_y, acc_z, que siguen en g). Asi la vista en vivo
+    "cruda" no cambia de comportamiento a menos que el usuario lo pida.
+    """
+    if not aplicar_calibracion_en_vivo or calibracion_activa is None:
+        return
+    acc_g = np.array([payload['acc_x'], payload['acc_y'], payload['acc_z']])
+    C = calibracion_activa["C"]
+    b_a = calibracion_activa["b_a"]
+    acc_cal_ms2 = C @ acc_g + b_a
+    payload['acc_x_cal'], payload['acc_y_cal'], payload['acc_z_cal'] = acc_cal_ms2.tolist()
+
 # Simulador de SensorTag
 simulating = False
 sim_thread = None
+sim_freq_hz = DEFAULT_FREQ_HZ
 
-def simulate_data_generator():
+def simulate_data_generator(freq_hz=DEFAULT_FREQ_HZ):
     global simulating
-    print("[SIM] Iniciando generador de datos simulados...")
+    dt = 1.0 / freq_hz
+    print(f"[SIM] Iniciando generador de datos simulados a {freq_hz}Hz...")
     t = 0
     while simulating:
-        time.sleep(0.1) # 10Hz
-        t += 0.1
+        time.sleep(dt)
+        t += dt
         
         # Simular rotacion de balanceo y cabeceo
         pitch = 0.4 * math.sin(t * 0.5)
@@ -192,7 +268,8 @@ def simulate_data_generator():
             'acc_x': ax, 'acc_y': ay, 'acc_z': az,
             'gyr_x': gx, 'gyr_y': gy, 'gyr_z': gz
         }
-        
+        _agregar_campos_calibrados(payload)
+
         with recording_lock:
             if state.is_recording:
                 state.recorded_data.append(payload)
@@ -212,14 +289,21 @@ def index():
 
 @app.route('/api/status')
 def get_status():
-    global simulating
+    global simulating, sim_freq_hz
     return jsonify({
         "ble_status": ble_manager.status,
         "ble_error": ble_manager.error,
         "is_simulating": simulating,
         "is_recording": state.is_recording,
         "recorded_samples": len(state.recorded_data) if state.is_recording else 0,
-        "recording_filename": state.filename
+        "recording_filename": state.filename,
+        # Frecuencia de muestreo: la que se solicito y la que realmente se
+        # esta midiendo a partir de los timestamps (pueden diferir si el
+        # SensorTag no honra el periodo pedido; ver notas al inicio del archivo)
+        "sample_rate_target_hz": ble_manager.freq_hz if ble_manager.status == "connected" else (sim_freq_hz if simulating else None),
+        "sample_rate_actual_hz": round(ble_manager.actual_hz, 2) if (ble_manager.status == "connected" and ble_manager.actual_hz) else (sim_freq_hz if simulating else None),
+        "sample_rate_warning": ble_manager.freq_warning if ble_manager.status == "connected" else None,
+        "supported_frequencies": sorted(SAMPLE_RATES.keys())
     })
 
 @app.route('/api/csv_files')
@@ -246,12 +330,17 @@ def get_csv_data(filename):
         for col in req_cols:
             if col not in df.columns:
                 return jsonify({"error": f"El archivo no tiene la columna requerida: {col}"}), 400
-        
-        # Rellenar timestamp si no existe
+
+        # Rellenar timestamp si no existe. Los CSV crudos no guardan la Fs
+        # con la que se capturaron, asi que se recibe por query param
+        # (?fs=10 o ?fs=50); si no se especifica, se asume 10Hz por
+        # compatibilidad con archivos antiguos.
         if 'timestamp' not in df.columns:
-            # Asumir 10Hz (0.1s entre muestras)
-            df['timestamp'] = [i * 0.1 for i in range(len(df))]
-            
+            fs = request.args.get('fs', default=DEFAULT_FREQ_HZ, type=float)
+            if fs <= 0:
+                fs = DEFAULT_FREQ_HZ
+            df['timestamp'] = [i / fs for i in range(len(df))]
+
         data = df[['timestamp', 'acc_x', 'acc_y', 'acc_z', 'gyr_x', 'gyr_y', 'gyr_z']].to_dict(orient='records')
         return jsonify(data)
     except Exception as e:
@@ -262,8 +351,12 @@ def connect_ble():
     global simulating
     if simulating:
         stop_simulation()
-    ble_manager.connect()
-    return jsonify({"status": "connecting"})
+    req = request.get_json(silent=True) or {}
+    freq_hz = int(req.get("freq", DEFAULT_FREQ_HZ))
+    if freq_hz not in SAMPLE_RATES:
+        return jsonify({"error": f"Frecuencia no soportada: {freq_hz}Hz. Opciones: {sorted(SAMPLE_RATES.keys())}"}), 400
+    ble_manager.connect(freq_hz=freq_hz)
+    return jsonify({"status": "connecting", "freq": freq_hz})
 
 @app.route('/api/disconnect', methods=['POST'])
 def disconnect_ble():
@@ -272,15 +365,21 @@ def disconnect_ble():
 
 @app.route('/api/start_simulation', methods=['POST'])
 def start_simulation_endpoint():
-    global simulating, sim_thread
+    global simulating, sim_thread, sim_freq_hz
     if ble_manager.status == "connected":
         ble_manager.disconnect()
-    
+
+    req = request.get_json(silent=True) or {}
+    freq_hz = int(req.get("freq", DEFAULT_FREQ_HZ))
+    if freq_hz not in SAMPLE_RATES:
+        return jsonify({"error": f"Frecuencia no soportada: {freq_hz}Hz. Opciones: {sorted(SAMPLE_RATES.keys())}"}), 400
+
     if not simulating:
+        sim_freq_hz = freq_hz
         simulating = True
-        sim_thread = threading.Thread(target=simulate_data_generator, daemon=True)
+        sim_thread = threading.Thread(target=simulate_data_generator, args=(freq_hz,), daemon=True)
         sim_thread.start()
-    return jsonify({"status": "simulating"})
+    return jsonify({"status": "simulating", "freq": freq_hz})
 
 @app.route('/api/stop_simulation', methods=['POST'])
 def stop_simulation_endpoint():
@@ -293,19 +392,29 @@ def stop_simulation():
 
 @app.route('/api/start_recording', methods=['POST'])
 def start_recording():
+    global simulating, sim_freq_hz
     req = request.json or {}
     filename = req.get("filename", "Prueba.csv")
     if not filename.endswith(".csv"):
         filename += ".csv"
-        
+
+    # La Fs de la grabacion es la de la fuente activa en este momento
+    if ble_manager.status == "connected":
+        freq_hz = ble_manager.freq_hz
+    elif simulating:
+        freq_hz = sim_freq_hz
+    else:
+        freq_hz = DEFAULT_FREQ_HZ
+
     with recording_lock:
         state.is_recording = True
         state.recorded_data = []
         state.filename = filename
         state.start_time = time.time()
-        
-    print(f"[REC] Grabando datos en {filename}...")
-    return jsonify({"status": "recording", "filename": filename})
+        state.freq_hz = freq_hz
+
+    print(f"[REC] Grabando datos en {filename} (Fs objetivo: {freq_hz}Hz)...")
+    return jsonify({"status": "recording", "filename": filename, "freq": freq_hz})
 
 @app.route('/api/stop_recording', methods=['POST'])
 def stop_recording():
@@ -321,24 +430,29 @@ def stop_recording():
         # Alinear timestamps respecto al inicio
         t0 = df['timestamp'].iloc[0]
         df['timestamp'] = df['timestamp'] - t0
-        
+
         filepath = os.path.join(WORKSPACE_DIR, state.filename)
         # Guardar columnas correspondientes a datos crudos
         columnas = ['acc_x', 'acc_y', 'acc_z', 'gyr_x', 'gyr_y', 'gyr_z']
         df[columnas].to_csv(filepath, index=False)
-        
+
         samples = len(df)
         duration = df['timestamp'].iloc[-1] - df['timestamp'].iloc[0]
+        fs_real = round((samples - 1) / duration, 2) if duration > 0 else None
+        freq_hz = state.freq_hz
         filename = state.filename
         state.recorded_data = []
         state.filename = ""
-        
-    print(f"[REC] Grabacion completada. Guardado en {filepath} ({samples} muestras, {duration:.1f}s)")
+
+    print(f"[REC] Grabacion completada. Guardado en {filepath} ({samples} muestras, {duration:.1f}s, "
+          f"Fs objetivo: {freq_hz}Hz, Fs real: {fs_real}Hz)")
     return jsonify({
         "status": "saved",
         "filename": filename,
         "samples": samples,
-        "duration": duration
+        "duration": duration,
+        "sample_rate_target_hz": freq_hz,
+        "sample_rate_actual_hz": fs_real
     })
 @app.route('/api/download_excel/<path:filename>')
 def download_excel(filename):
@@ -353,9 +467,13 @@ def download_excel(filename):
     try:
         df = pd.read_csv(filepath)
 
-        # Reconstruir timestamp si no existe
+        # Reconstruir timestamp si no existe (misma logica que /api/csv_data,
+        # Fs indicada por query param ?fs=, default 10Hz por compatibilidad)
         if 'timestamp' not in df.columns:
-            df.insert(0, 'Tiempo (s)', [round(i * 0.1, 1) for i in range(len(df))])
+            fs = request.args.get('fs', default=DEFAULT_FREQ_HZ, type=float)
+            if fs <= 0:
+                fs = DEFAULT_FREQ_HZ
+            df.insert(0, 'Tiempo (s)', [round(i / fs, 3) for i in range(len(df))])
         else:
             df.insert(0, 'Tiempo (s)', df['timestamp'].round(3))
 
@@ -400,6 +518,230 @@ def download_excel(filename):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Calibracion del acelerometro (ver calibracion_MPU_CC2650.pdf y
+# calculo_promedios.py). El usuario sube la CARPETA con los 6 CSV crudos
+# (uno por posicion estatica +X,-X,+Y,-Y,+Z,-Z) y aqui se reproduce el MISMO
+# algoritmo de calculo_promedios.py: promedio por archivo (descartando el
+# transitorio), matriz homogenea M (4x6), pseudoinversa, y Theta = G @ pinv(M).
+#
+# Diferencia respecto al script original: en vez de asumir el orden de los
+# archivos que da glob.glob() (orden alfabetico del sistema de archivos, que
+# podria desalinear una posicion con la columna equivocada de G), aqui se
+# detecta la posicion (eje + signo) a partir del NOMBRE de cada archivo. Si
+# algun archivo es ambiguo (no se pudo determinar eje o signo) o faltan/sobran
+# posiciones, se devuelve un error explicito en vez de adivinar en silencio.
+#
+# Las lecturas crudas del sensor ya vienen en g (ver grabar_sensortag.py /
+# _sensor_callback: raw/16384). Para que la calibracion resultante (C, b_a)
+# convierta directamente a m/s^2 en vez de g, el valor "ideal" de la gravedad
+# usado al armar G es 9.81 (no 1.0) — el resto del algebra es identica.
+# ---------------------------------------------------------------------------
+CALIB_ORDEN_POSICIONES = ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]
+CALIB_N_DESCARTE_SEGUNDOS = 2  # mismo criterio que calculo_promedios.py (fila 22 en Excel = indice 20)
+GRAVEDAD_MS2 = 9.81
+
+# Matriz de valores ideales G (3x6). Antes se usaba +-1 (g); ahora +-9.81
+# (m/s^2) para que C y b_a salgan directamente en m/s^2.
+CALIB_G = np.array([
+    [1, -1, 0, 0, 0, 0],
+    [0, 0, 1, -1, 0, 0],
+    [0, 0, 0, 0, 1, -1],
+], dtype=float) * GRAVEDAD_MS2
+
+# Calibracion actualmente cargada (None si aun no se ha procesado ninguna)
+calibracion_activa = None          # {"C": np.array(3x3), "b_a": np.array(3,), "fs_hz": float}
+aplicar_calibracion_en_vivo = False  # si True, el stream SSE agrega acc_x_cal, etc.
+
+
+def _detectar_posicion(nombre_archivo):
+    """
+    Intenta determinar a que posicion (+X,-X,+Y,-Y,+Z,-Z) corresponde un
+    archivo a partir de su nombre. Devuelve la posicion (str) o None si es
+    ambiguo. Reglas:
+      - Eje: la primera letra X/Y/Z que no esta pegada a OTRA letra a su
+        izquierda, y a su derecha o bien tampoco hay letra (ej. "eje X +",
+        "eje_x") o bien le sigue "up"/"down" (ej. "Xup.csv", "Xdown.csv").
+      - Signo: '-' o 'down' o 'abajo' -> negativo; '+' o 'up' o 'arriba' ->
+        positivo. Se busca en todo el nombre (case-insensitive).
+    """
+    base = os.path.splitext(nombre_archivo)[0]
+    base_lower = base.lower()
+
+    eje = None
+    for m in re.finditer(r'(?<![A-Za-z])([XYZxyz])', base):
+        siguiente = base[m.end():m.end() + 4].lower()
+        if not siguiente[:1].isalpha() or siguiente.startswith('up') or siguiente.startswith('down'):
+            eje = m.group(1).upper()
+            break
+    if eje is None:
+        return None
+
+    tiene_negativo = ('-' in base) or ('down' in base_lower) or ('abajo' in base_lower)
+    tiene_positivo = ('+' in base) or ('up' in base_lower) or ('arriba' in base_lower)
+
+    if tiene_negativo and not tiene_positivo:
+        signo = '-'
+    elif tiene_positivo and not tiene_negativo:
+        signo = '+'
+    else:
+        return None  # ambiguo: tiene ambos indicios o ninguno
+
+    return f"{signo}{eje}"
+
+
+@app.route('/api/calibracion/procesar', methods=['POST'])
+def calibracion_procesar():
+    """
+    Espera un form-data con:
+      - los archivos de la carpeta bajo la clave 'archivos' (multiples,
+        input con webkitdirectory en el frontend)
+      - campo opcional 'fs' (Hz) con la frecuencia de muestreo de las
+        capturas (default 10), usado para saber cuantas muestras descartar.
+    """
+    global calibracion_activa
+
+    fs_hz = float(request.form.get('fs', DEFAULT_FREQ_HZ))
+    if fs_hz <= 0:
+        return jsonify({"error": "La frecuencia (fs) debe ser mayor que 0"}), 400
+
+    archivos_subidos = [f for f in request.files.getlist('archivos') if f.filename]
+    if not archivos_subidos:
+        return jsonify({"error": "No se recibio ningun archivo. Selecciona la carpeta con los 6 CSV."}), 400
+
+    # --- Detectar la posicion de cada archivo por su nombre ---
+    detectados = {}       # posicion -> FileStorage
+    no_reconocidos = []
+    duplicados = []
+    for archivo in archivos_subidos:
+        nombre = os.path.basename(archivo.filename)
+        if not nombre.lower().endswith('.csv'):
+            continue
+        pos = _detectar_posicion(nombre)
+        if pos is None:
+            no_reconocidos.append(nombre)
+            continue
+        if pos in detectados:
+            duplicados.append(f"{nombre} (misma posicion {pos} que {os.path.basename(detectados[pos].filename)})")
+            continue
+        detectados[pos] = archivo
+
+    faltantes = [p for p in CALIB_ORDEN_POSICIONES if p not in detectados]
+    if no_reconocidos or duplicados or faltantes:
+        partes = []
+        if faltantes:
+            partes.append(f"faltan posiciones: {faltantes}")
+        if no_reconocidos:
+            partes.append(f"no se pudo determinar la posicion de: {no_reconocidos}")
+        if duplicados:
+            partes.append(f"archivos duplicados para la misma posicion: {duplicados}")
+        detectado_resumen = {p: os.path.basename(f.filename) for p, f in detectados.items()}
+        return jsonify({
+            "error": "No se pudo identificar automaticamente las 6 posiciones a partir de los nombres de archivo "
+                     "(" + "; ".join(partes) + "). Los nombres deben incluir el eje (X/Y/Z) y el signo "
+                     "(+ / - , o 'up'/'down', o 'arriba'/'abajo'). Detectado hasta ahora: " + str(detectado_resumen)
+        }), 400
+
+    n_descarte = int(round(fs_hz * CALIB_N_DESCARTE_SEGUNDOS))
+
+    promedios = []
+    detalles = {}
+
+    for pos in CALIB_ORDEN_POSICIONES:
+        archivo = detectados[pos]
+        try:
+            df = pd.read_csv(archivo)
+        except Exception as e:
+            return jsonify({"error": f"No se pudo leer el archivo de {pos} ({archivo.filename}): {e}"}), 400
+
+        # Igual que calculo_promedios.py: usa las primeras 3 columnas
+        # (acc_x, acc_y, acc_z), por nombre si existen o por posicion si no.
+        if {"acc_x", "acc_y", "acc_z"}.issubset(df.columns):
+            columnas = ["acc_x", "acc_y", "acc_z"]
+        elif df.shape[1] >= 3:
+            columnas = df.columns[:3].tolist()
+        else:
+            return jsonify({"error": f"{pos} ({archivo.filename}): el archivo no tiene al menos 3 columnas"}), 400
+
+        if n_descarte >= len(df):
+            return jsonify({
+                "error": f"{pos} ({archivo.filename}): la captura tiene {len(df)} muestras, no alcanza "
+                         f"para descartar {n_descarte} muestras de transitorio ({CALIB_N_DESCARTE_SEGUNDOS}s a {fs_hz}Hz)."
+            }), 400
+
+        ventana = df.iloc[n_descarte:]
+        promedio = ventana[columnas].mean().to_numpy(dtype=float)
+        promedios.append(promedio)
+        detalles[pos] = {
+            "archivo": os.path.basename(archivo.filename),
+            "muestras_totales": int(len(df)),
+            "muestras_usadas": int(len(ventana)),
+            "promedio_g": promedio.tolist(),
+        }
+
+    # --- Mismo algoritmo que calculo_promedios.py, Pasos 2 y 3 ---
+    # Nota: los promedios de entrada siguen en g (unidad nativa del sensor);
+    # lo que cambia a m/s^2 es el lado "ideal" (CALIB_G), lo cual hace que
+    # C y b_a mapeen g -> m/s^2 directamente.
+    matriz_transpuesta = np.array(promedios).T          # 3x6 (filas -> columnas)
+    fila_unos = np.ones((1, len(CALIB_ORDEN_POSICIONES)))
+    M = np.vstack([matriz_transpuesta, fila_unos])       # 4x6, matriz homogenea
+
+    M_plus = np.linalg.pinv(M)                           # pseudoinversa de Moore-Penrose
+    Theta = CALIB_G @ M_plus                              # 3x4
+
+    C = Theta[:, 0:3]
+    b_a = Theta[:, 3]
+
+    # Verificacion independiente (formula de pares), eje por eje, en m/s^2
+    verificacion = {}
+    pares = {"x": ("+X", "-X", 0), "y": ("+Y", "-Y", 1), "z": ("+Z", "-Z", 2)}
+    for eje, (pos_mas, pos_menos, idx) in pares.items():
+        m_mas = detalles[pos_mas]["promedio_g"][idx]
+        m_menos = detalles[pos_menos]["promedio_g"][idx]
+        s = 2.0 * GRAVEDAD_MS2 / (m_mas - m_menos)
+        b = -s * (m_mas + m_menos) / 2
+        verificacion[eje] = {"escala": s, "bias_ms2": b}
+
+    # Guardar como calibracion activa (disponible para aplicar en vivo)
+    calibracion_activa = {"C": C, "b_a": b_a, "fs_hz": fs_hz}
+
+    return jsonify({
+        "status": "ok",
+        "unidad": "m/s^2",
+        "fs_hz": fs_hz,
+        "n_descarte_muestras": n_descarte,
+        "C": C.tolist(),
+        "b_a": b_a.tolist(),
+        "detalles_por_posicion": detalles,
+        "verificacion_formula_pares": verificacion,
+    })
+
+
+@app.route('/api/calibracion/aplicar', methods=['POST'])
+def calibracion_aplicar():
+    """Activa/desactiva que el stream en vivo (SSE) incluya campos calibrados."""
+    global aplicar_calibracion_en_vivo
+    req = request.json or {}
+    activar = bool(req.get("activar", False))
+
+    if activar and calibracion_activa is None:
+        return jsonify({"error": "Aun no se ha procesado ninguna calibracion."}), 400
+
+    aplicar_calibracion_en_vivo = activar
+    return jsonify({"status": "ok", "aplicar_calibracion_en_vivo": aplicar_calibracion_en_vivo})
+
+
+@app.route('/api/calibracion/estado')
+def calibracion_estado():
+    return jsonify({
+        "tiene_calibracion": calibracion_activa is not None,
+        "aplicar_calibracion_en_vivo": aplicar_calibracion_en_vivo,
+        "fs_hz": calibracion_activa["fs_hz"] if calibracion_activa else None,
+    })
+
 
 
 @app.route('/api/stream')

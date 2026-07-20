@@ -26,11 +26,15 @@ document.addEventListener("DOMContentLoaded", () => {
     let angleRollGyro = 0, anglePitchGyro = 0, angleYawGyro = 0;
     let angleRollFilter = 0, anglePitchFilter = 0, angleYawFilter = 0;
     let lastTimestamp = null;
-    
-    // Para cálculo de sesgo (bias) en reposo
-    let biasCalibrating = false;
-    let biasSamples = [];
+
+    // Correccion de bias del giroscopio aplicada a la orientacion en vivo
+    // (queda en 0 hasta que exista un mecanismo que la alimente)
     let gyroBias = { x: 0, y: 0, z: 0 };
+
+    // Frecuencia de muestreo: la seleccionada en la UI (se manda al conectar/simular)
+    // y la que efectivamente esta activa ahora mismo (para calibracion de bias, etc.)
+    let selectedFreqHz = 10;
+    let activeSampleRateHz = 10;
 
     // === Inicialización de Elementos UI ===
     const navButtons = document.querySelectorAll(".nav-btn");
@@ -42,6 +46,15 @@ document.addEventListener("DOMContentLoaded", () => {
     const btnDisconnect = document.getElementById("btn-disconnect");
     const btnSimulate = document.getElementById("btn-simulate");
     const btnStopSimulate = document.getElementById("btn-stop-simulate");
+
+    // Selector de frecuencia de muestreo (10Hz / 50Hz)
+    const freqButtons = document.querySelectorAll(".freq-btn");
+    const freqLiveBadge = document.getElementById("freq-live-badge");
+    const freqTargetVal = document.getElementById("freq-target-val");
+    const freqActualVal = document.getElementById("freq-actual-val");
+    const freqWarningBox = document.getElementById("freq-warning-box");
+    const freqWarningText = document.getElementById("freq-warning-text");
+    const csvFsSelect = document.getElementById("csv-fs-select");
     
     const recFilename = document.getElementById("rec-filename");
     const btnRecord = document.getElementById("btn-record");
@@ -80,13 +93,29 @@ document.addEventListener("DOMContentLoaded", () => {
     const valPitch = document.getElementById("val-pitch");
     const valYaw = document.getElementById("val-yaw");
 
-    // Controles Filtro
-    const filterAlphaInput = document.getElementById("filter-alpha");
-    const valAlphaSpan = document.getElementById("val-alpha");
-    const btnCalibrateBias = document.getElementById("btn-calibrate-bias");
-    const biasXVal = document.getElementById("bias-x-val");
-    const biasYVal = document.getElementById("bias-y-val");
-    const biasZVal = document.getElementById("bias-z-val");
+    // === Nueva pestaña: Calibración del acelerómetro ===
+    let calibFreqHz = 10;
+    let calibArchivosSeleccionados = [];  // File[] de la carpeta elegida
+    const calibFreqSelector = document.getElementById("calib-freq-selector");
+    const calibFolderInput = document.getElementById("calib-folder-input");
+    const calibFolderLista = document.getElementById("calib-folder-lista");
+    const btnCalibProcesar = document.getElementById("btn-calib-procesar");
+    const btnCalibDescargar = document.getElementById("btn-calib-descargar");
+    const calibErrorBox = document.getElementById("calib-error-box");
+    const calibErrorText = document.getElementById("calib-error-text");
+    const calibResultadoCard = document.getElementById("calib-resultado-card");
+    const calibVerificacionCard = document.getElementById("calib-verificacion-card");
+    const calibMatrixC = document.getElementById("calib-matrix-c");
+    const calibVectorB = document.getElementById("calib-vector-b");
+    const calibVerificacionTabla = document.getElementById("calib-verificacion-tabla");
+    const calibToggleVivo = document.getElementById("calib-toggle-vivo");
+    let ultimoResultadoCalibracion = null;
+
+    // Panel de telemetría calibrada en vivo (Dashboard)
+    const calibLiveBadge = document.getElementById("calib-live-badge");
+    const valAxCal = document.getElementById("val-ax-cal");
+    const valAyCal = document.getElementById("val-ay-cal");
+    const valAzCal = document.getElementById("val-az-cal");
 
     // === Control de Pestañas ===
     navButtons.forEach(btn => {
@@ -105,9 +134,6 @@ document.addEventListener("DOMContentLoaded", () => {
             if (activeTab === "charts") {
                 chartAcc.resize();
                 chartGyr.resize();
-            } else if (activeTab === "drift") {
-                chartFusionPitch.resize();
-                chartFusionYaw.resize();
             }
         });
     });
@@ -296,35 +322,9 @@ document.addEventListener("DOMContentLoaded", () => {
         options: chartOptions("Velocidad Angular (rad/s)")
     });
 
-    // Chart Fusión Pitch
-    const ctxFusionPitch = document.getElementById("chart-fusion-pitch").getContext("2d");
-    const chartFusionPitch = new Chart(ctxFusionPitch, {
-        type: "line",
-        data: {
-            labels: [],
-            datasets: [
-                { label: "Acelerómetro (Ruidoso)", data: [], borderColor: "#ffa502", borderWidth: 1.5, pointRadius: 0, tension: 0.1 },
-                { label: "Giroscopio (Deriva)", data: [], borderColor: "#ff4757", borderWidth: 1.5, pointRadius: 0, tension: 0.1 },
-                { label: "Filtro Complementario (Estable)", data: [], borderColor: "#a55eea", borderWidth: 2.5, pointRadius: 0, tension: 0.1 }
-            ]
-        },
-        options: chartOptions("Ángulo Pitch (grados)")
-    });
-
-    // Chart Fusión Yaw
-    const ctxFusionYaw = document.getElementById("chart-fusion-yaw").getContext("2d");
-    const chartFusionYaw = new Chart(ctxFusionYaw, {
-        type: "line",
-        data: {
-            labels: [],
-            datasets: [
-                { label: "Guiñada (γ Integrada)", data: [], borderColor: "#ff4757", backgroundColor: "rgba(255, 71, 87, 0.05)", borderWidth: 2.5, pointRadius: 0, tension: 0.1 }
-            ]
-        },
-        options: chartOptions("Ángulo Yaw (grados)")
-    });
-
     // === Lógica del Algoritmo de Orientación ===
+    // (alimenta el cubo 3D del Dashboard: filtro complementario Roll/Pitch,
+    //  integracion de Yaw; ya no hay pestaña de graficas de deriva dedicada)
     function resetOrientation() {
         angleRollAcc = 0; anglePitchAcc = 0;
         angleRollGyro = 0; anglePitchGyro = 0; angleYawGyro = 0;
@@ -337,11 +337,6 @@ document.addEventListener("DOMContentLoaded", () => {
             chartAcc.data.datasets.forEach(d => d.data = []);
             chartGyr.data.labels = [];
             chartGyr.data.datasets.forEach(d => d.data = []);
-            
-            chartFusionPitch.data.labels = [];
-            chartFusionPitch.data.datasets.forEach(d => d.data = []);
-            chartFusionYaw.data.labels = [];
-            chartFusionYaw.data.datasets.forEach(d => d.data = []);
         }
     }
 
@@ -420,15 +415,6 @@ document.addEventListener("DOMContentLoaded", () => {
         valPitch.innerText = `${pitchDeg.toFixed(1)}°`;
         valYaw.innerText = `${yawDeg.toFixed(1)}°`;
 
-        // Calibración de sesgo en reposo
-        if (biasCalibrating && isLive) {
-            biasSamples.push({x: gx, y: gy, z: gz});
-            if (biasSamples.length >= 30) { // 3 segundos a 10Hz
-                biasCalibrating = false;
-                calculateBiasResult();
-            }
-        }
-
         // === Actualizar Modelo 3D ===
         // Aplicar rotaciones en los ejes correspondientes:
         // Roll (alrededor del eje Z de Three.js / X del sensor)
@@ -454,8 +440,6 @@ document.addEventListener("DOMContentLoaded", () => {
             // Modo Live: Desplazar gráficos
             appendChartData(chartAcc, tLabel, [ax, ay, az], 50);
             appendChartData(chartGyr, tLabel, [gx, gy, gz], 50);
-            appendChartData(chartFusionPitch, tLabel, [pitchAccDeg, pitchGyroDeg, pitchDeg], 50);
-            appendChartData(chartFusionYaw, tLabel, [yawGyroDeg], 50);
         }
     }
 
@@ -488,56 +472,6 @@ document.addEventListener("DOMContentLoaded", () => {
         chart.update("none"); // Actualizar sin animaciones para mayor velocidad
     }
 
-    // === Control de Calibración de Sesgo (Bias) ===
-    function startBiasCalibration() {
-        if (!isConnected && !isSimulating) return;
-        biasCalibrating = true;
-        biasSamples = [];
-        btnCalibrateBias.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Calibrando...`;
-        btnCalibrateBias.disabled = true;
-    }
-
-    function calculateBiasResult() {
-        const sum = biasSamples.reduce((acc, val) => {
-            acc.x += val.x;
-            acc.y += val.y;
-            acc.z += val.z;
-            return acc;
-        }, {x:0, y:0, z:0});
-        
-        const count = biasSamples.length;
-        gyroBias.x = sum.x / count;
-        gyroBias.y = sum.y / count;
-        gyroBias.z = sum.z / count;
-        
-        biasXVal.innerText = `${gyroBias.x.toFixed(4)} rad/s`;
-        biasYVal.innerText = `${gyroBias.y.toFixed(4)} rad/s`;
-        biasZVal.innerText = `${gyroBias.z.toFixed(4)} rad/s`;
-        
-        btnCalibrateBias.innerHTML = `<i class="fa-solid fa-arrows-to-dot"></i> Calcular Sesgo en Reposo`;
-        btnCalibrateBias.disabled = false;
-        
-        // Resetear la integración del giroscopio
-        angleRollGyro = angleRollFilter;
-        anglePitchGyro = anglePitchFilter;
-        angleYawGyro = 0;
-        
-        console.log("[CAL] Sesgo de Giroscopio calculado:", gyroBias);
-    }
-
-    // Escuchar el slider de Alpha
-    filterAlphaInput.addEventListener("input", (e) => {
-        alpha = parseFloat(e.target.value);
-        valAlphaSpan.innerText = alpha.toFixed(2);
-        
-        // Si estamos reproduciendo datos de forma estática, regenerar la fusión
-        if (csvData.length > 0 && !isPlaying && !isConnected && !isSimulating) {
-            recalculateOfflineFusion();
-        }
-    });
-
-    btnCalibrateBias.addEventListener("click", startBiasCalibration);
-
     // === Manejo del Canal SSE (Tiempo Real) ===
     function startSSE() {
         if (sseSource) {
@@ -553,6 +487,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (data.heartbeat) return;
             
             processIMUData(data, true);
+            actualizarTelemetriaCalibrada(data);
         };
         
         sseSource.onerror = (err) => {
@@ -584,10 +519,10 @@ document.addEventListener("DOMContentLoaded", () => {
                     btnSimulate.classList.add("hidden");
                     btnStopSimulate.classList.add("hidden");
                     btnRecord.disabled = false;
-                    btnCalibrateBias.disabled = biasCalibrating;
                     sourceBadge.className = "sensor-mode-badge live";
                     sourceBadge.innerText = "Modo: En Vivo (SensorTag)";
-                    
+                    setFreqSelectorEnabled(false);
+
                     if (!isConnected) {
                         isConnected = true;
                         isSimulating = false;
@@ -598,6 +533,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     bleStatusDot.classList.add("connecting");
                     bleStatusText.innerText = data.ble_status === "scanning" ? "Escaneando..." : "Conectando...";
                     btnConnect.disabled = true;
+                    setFreqSelectorEnabled(false);
                 } else if (data.is_simulating) {
                     bleStatusDot.classList.add("simulating");
                     bleStatusText.innerText = "Simulando";
@@ -606,10 +542,10 @@ document.addEventListener("DOMContentLoaded", () => {
                     btnSimulate.classList.add("hidden");
                     btnStopSimulate.classList.remove("hidden");
                     btnRecord.disabled = false;
-                    btnCalibrateBias.disabled = biasCalibrating;
                     sourceBadge.className = "sensor-mode-badge simulation";
                     sourceBadge.innerText = "Modo: Simulación Activa";
-                    
+                    setFreqSelectorEnabled(false);
+
                     if (!isSimulating) {
                         isSimulating = true;
                         isConnected = false;
@@ -625,8 +561,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     btnSimulate.classList.remove("hidden");
                     btnStopSimulate.classList.add("hidden");
                     btnRecord.disabled = true;
-                    btnCalibrateBias.disabled = true;
-                    
+                    setFreqSelectorEnabled(true);
+
                     if (isConnected || isSimulating) {
                         isConnected = false;
                         isSimulating = false;
@@ -634,6 +570,27 @@ document.addEventListener("DOMContentLoaded", () => {
                         sourceBadge.className = "sensor-mode-badge";
                         sourceBadge.innerText = "Modo: Esperando Datos";
                     }
+                }
+
+                // === Fs objetivo vs Fs real medida ===
+                // Al conectar al SensorTag de verdad, el firmware puede no honrar
+                // la Fs solicitada (ver nota en visualizador_server.py). Por eso
+                // siempre mostramos lo medido, no solo lo pedido.
+                if (data.sample_rate_target_hz) {
+                    activeSampleRateHz = data.sample_rate_actual_hz || data.sample_rate_target_hz;
+                    freqLiveBadge.classList.remove("hidden");
+                    freqTargetVal.innerText = data.sample_rate_target_hz;
+                    freqActualVal.innerText = data.sample_rate_actual_hz != null ? data.sample_rate_actual_hz : "midiendo...";
+
+                    if (data.sample_rate_warning) {
+                        freqWarningBox.classList.remove("hidden");
+                        freqWarningText.innerText = data.sample_rate_warning;
+                    } else {
+                        freqWarningBox.classList.add("hidden");
+                    }
+                } else {
+                    freqLiveBadge.classList.add("hidden");
+                    freqWarningBox.classList.add("hidden");
                 }
 
                 // Sincronizar grabación
@@ -658,9 +615,200 @@ document.addEventListener("DOMContentLoaded", () => {
     setInterval(checkServerStatus, 1000);
     checkServerStatus();
 
+    // === Selector de Frecuencia de Muestreo ===
+    freqButtons.forEach(btn => {
+        btn.addEventListener("click", () => {
+            if (btn.disabled) return;
+            selectedFreqHz = parseInt(btn.getAttribute("data-freq"), 10);
+            freqButtons.forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+        });
+    });
+
+    function setFreqSelectorEnabled(enabled) {
+        freqButtons.forEach(b => { b.disabled = !enabled; });
+    }
+
+    // === Pestaña de Calibración del Acelerómetro ===
+    if (calibFreqSelector) {
+        calibFreqSelector.querySelectorAll(".freq-btn").forEach(btn => {
+            btn.addEventListener("click", () => {
+                calibFreqHz = parseInt(btn.getAttribute("data-freq"), 10);
+                calibFreqSelector.querySelectorAll(".freq-btn").forEach(b => b.classList.remove("active"));
+                btn.classList.add("active");
+            });
+        });
+    }
+
+    calibFolderInput.addEventListener("change", () => {
+        // Solo nos interesan los .csv dentro de la carpeta seleccionada
+        calibArchivosSeleccionados = Array.from(calibFolderInput.files)
+            .filter(f => f.name.toLowerCase().endsWith(".csv"));
+
+        if (calibArchivosSeleccionados.length === 0) {
+            calibFolderLista.innerHTML = `<span class="calib-folder-vacia">La carpeta no contiene archivos .csv.</span>`;
+            btnCalibProcesar.disabled = true;
+            return;
+        }
+
+        calibFolderLista.innerHTML = calibArchivosSeleccionados
+            .map(f => `<div class="calib-folder-item"><i class="fa-solid fa-file-csv"></i> ${f.name}</div>`)
+            .join("");
+        btnCalibProcesar.disabled = false;
+        calibErrorBox.classList.add("hidden");
+    });
+
+    function mostrarErrorCalibracion(mensaje) {
+        calibErrorText.innerText = mensaje;
+        calibErrorBox.classList.remove("hidden");
+        calibResultadoCard.classList.add("hidden");
+        calibVerificacionCard.classList.add("hidden");
+    }
+
+    function formatearNumero(n) {
+        return Number(n).toFixed(6);
+    }
+
+    function renderizarResultadoCalibracion(resultado) {
+        calibErrorBox.classList.add("hidden");
+        ultimoResultadoCalibracion = resultado;
+
+        // Matriz C (3x3)
+        let filasC = "";
+        for (let i = 0; i < 3; i++) {
+            filasC += "<tr>" + resultado.C[i].map(v => `<td>${formatearNumero(v)}</td>`).join("") + "</tr>";
+        }
+        calibMatrixC.innerHTML = filasC;
+
+        // Vector b (3x1), en m/s^2
+        const etiquetasEjes = ["x", "y", "z"];
+        let filasB = resultado.b_a.map((v, i) => `<tr><td>b_${etiquetasEjes[i]}</td><td>${formatearNumero(v)}</td></tr>`).join("");
+        calibVectorB.innerHTML = filasB;
+
+        calibResultadoCard.classList.remove("hidden");
+        calibToggleVivo.checked = false;  // el usuario decide activarla explícitamente
+
+        // Verificación (fórmula de pares)
+        const verif = resultado.verificacion_formula_pares;
+        let filasV = "<tr><th>Eje</th><th>Escala</th><th>Bias (m/s²)</th></tr>";
+        for (const eje of ["x", "y", "z"]) {
+            filasV += `<tr><td>${eje}</td><td>${formatearNumero(verif[eje].escala)}</td><td>${formatearNumero(verif[eje].bias_ms2)}</td></tr>`;
+        }
+        calibVerificacionTabla.innerHTML = filasV;
+        calibVerificacionCard.classList.remove("hidden");
+    }
+
+    btnCalibProcesar.addEventListener("click", () => {
+        if (calibArchivosSeleccionados.length === 0) {
+            mostrarErrorCalibracion("Selecciona primero la carpeta con los 6 CSV.");
+            return;
+        }
+
+        const formData = new FormData();
+        calibArchivosSeleccionados.forEach(f => formData.append("archivos", f, f.name));
+        formData.append("fs", calibFreqHz);
+
+        btnCalibProcesar.disabled = true;
+        btnCalibProcesar.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Procesando...`;
+
+        fetch("/api/calibracion/procesar", { method: "POST", body: formData })
+            .then(res => res.json().then(data => ({ ok: res.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok) {
+                    mostrarErrorCalibracion(data.error || "Error desconocido al procesar la calibración.");
+                    return;
+                }
+                renderizarResultadoCalibracion(data);
+            })
+            .catch(err => mostrarErrorCalibracion("Error de conexión: " + err))
+            .finally(() => {
+                btnCalibProcesar.disabled = false;
+                btnCalibProcesar.innerHTML = `<i class="fa-solid fa-calculator"></i> Procesar Calibración`;
+            });
+    });
+
+    btnCalibDescargar.addEventListener("click", () => {
+        if (!ultimoResultadoCalibracion) return;
+        const payload = {
+            C: ultimoResultadoCalibracion.C,
+            b_a: ultimoResultadoCalibracion.b_a,
+            unidad: "m/s^2",
+            fs_hz: ultimoResultadoCalibracion.fs_hz,
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "calibracion.json";
+        a.click();
+        URL.revokeObjectURL(url);
+    });
+
+    // Activar/desactivar que la vista en vivo muestre datos ya calibrados
+    calibToggleVivo.addEventListener("change", () => {
+        const activar = calibToggleVivo.checked;
+        fetch("/api/calibracion/aplicar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ activar }),
+        })
+            .then(res => res.json().then(data => ({ ok: res.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok) {
+                    calibToggleVivo.checked = false;
+                    mostrarErrorCalibracion(data.error || "No se pudo activar la calibración en vivo.");
+                    return;
+                }
+                actualizarBadgeCalibracionVivo(data.aplicar_calibracion_en_vivo);
+            });
+    });
+
+    function actualizarBadgeCalibracionVivo(activa) {
+        if (activa) {
+            calibLiveBadge.innerText = "Calibración aplicada";
+            calibLiveBadge.className = "sensor-mode-badge live";
+        } else {
+            calibLiveBadge.innerText = "Sin calibración aplicada";
+            calibLiveBadge.className = "sensor-mode-badge";
+            valAxCal.innerText = "0.000";
+            valAyCal.innerText = "0.000";
+            valAzCal.innerText = "0.000";
+        }
+    }
+
+    function actualizarTelemetriaCalibrada(data) {
+        if (data.acc_x_cal === undefined) {
+            if (calibLiveBadge.innerText !== "Sin calibración aplicada") {
+                actualizarBadgeCalibracionVivo(false);
+            }
+            return;
+        }
+        if (calibLiveBadge.innerText !== "Calibración aplicada") {
+            actualizarBadgeCalibracionVivo(true);
+        }
+        valAxCal.innerText = data.acc_x_cal.toFixed(3);
+        valAyCal.innerText = data.acc_y_cal.toFixed(3);
+        valAzCal.innerText = data.acc_z_cal.toFixed(3);
+    }
+
+    // Al cargar la página, reflejar si el servidor ya tiene una calibración activa
+    fetch("/api/calibracion/estado")
+        .then(res => res.json())
+        .then(data => {
+            if (data.tiene_calibracion && data.aplicar_calibracion_en_vivo) {
+                calibToggleVivo.checked = true;
+                actualizarBadgeCalibracionVivo(true);
+            }
+        })
+        .catch(() => {});
+
     // === Controladores de Eventos del Sensor ===
     btnConnect.addEventListener("click", () => {
-        fetch("/api/connect", { method: "POST" })
+        fetch("/api/connect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ freq: selectedFreqHz })
+        })
             .then(res => res.json())
             .then(() => checkServerStatus());
     });
@@ -672,7 +820,11 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     btnSimulate.addEventListener("click", () => {
-        fetch("/api/start_simulation", { method: "POST" })
+        fetch("/api/start_simulation", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ freq: selectedFreqHz })
+        })
             .then(res => res.json())
             .then(() => checkServerStatus());
     });
@@ -728,7 +880,21 @@ document.addEventListener("DOMContentLoaded", () => {
                     // Mostrar botón de descarga Excel
                     btnDownloadExcel.classList.remove("hidden");
                     btnDownloadExcel.dataset.filename = data.filename;
-                    alert(`✅ Grabación completada\nArchivo CSV: ${data.filename}\nMuestras: ${data.samples}\nDuración: ${data.duration.toFixed(1)} s`);
+                    btnDownloadExcel.dataset.freq = data.sample_rate_target_hz || 10;
+
+                    let msg = `✅ Grabación completada\nArchivo CSV: ${data.filename}\nMuestras: ${data.samples}\nDuración: ${data.duration.toFixed(1)} s`;
+                    if (data.sample_rate_target_hz) {
+                        msg += `\nFs objetivo: ${data.sample_rate_target_hz} Hz | Fs real medida: ${data.sample_rate_actual_hz} Hz`;
+                        if (Math.abs(data.sample_rate_actual_hz - data.sample_rate_target_hz) > 1) {
+                            msg += `\n⚠️ La Fs real no coincide con la solicitada. Revisa el aviso en el panel de conexión.`;
+                        }
+                    }
+                    alert(msg);
+
+                    // Preseleccionar la Fs correcta en el selector de reproducción
+                    if (data.sample_rate_target_hz) {
+                        csvFsSelect.value = String(data.sample_rate_target_hz);
+                    }
                 } else {
                     alert("No se capturaron muestras.");
                 }
@@ -740,8 +906,9 @@ document.addEventListener("DOMContentLoaded", () => {
     // Botón de descarga Excel
     btnDownloadExcel.addEventListener("click", () => {
         const filename = btnDownloadExcel.dataset.filename;
+        const freq = btnDownloadExcel.dataset.freq || 10;
         if (filename) {
-            window.location.href = `/api/download_excel/${encodeURIComponent(filename)}`;
+            window.location.href = `/api/download_excel/${encodeURIComponent(filename)}?fs=${freq}`;
         }
     });
 
@@ -783,8 +950,23 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         }
 
+        loadSelectedCsv(filename);
+    });
+
+    // Si el usuario cambia la Fs de reproducción con un archivo ya cargado,
+    // recargar para reconstruir el eje de tiempo correctamente. Los CSV
+    // crudos no guardan su Fs de captura, así que esto es necesario para
+    // que un archivo grabado a 50Hz no se interprete como si fuera de 10Hz.
+    csvFsSelect.addEventListener("change", () => {
+        if (csvSelect.value) {
+            loadSelectedCsv(csvSelect.value);
+        }
+    });
+
+    function loadSelectedCsv(filename) {
+        const fs = csvFsSelect.value || 10;
         // Cargar los datos del CSV
-        fetch(`/api/csv_data/${filename}`)
+        fetch(`/api/csv_data/${filename}?fs=${fs}`)
             .then(res => res.json())
             .then(data => {
                 if (data.error) {
@@ -813,12 +995,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 // Mostrar gráficos completos de una vez
                 plotWholeOfflineData();
                 
-                // Procesar la primera muestra para posicionar el sensor 3D
-                recalculateOfflineFusion();
                 updateOfflineUI();
             })
             .catch(err => alert("Error cargando archivo: " + err));
-    });
+    }
 
     // === Visualización Offline y Fusión en Bloque ===
     function plotWholeOfflineData() {
@@ -843,82 +1023,12 @@ document.addEventListener("DOMContentLoaded", () => {
         chartGyr.update();
     }
 
-    // Calcula de forma estática la fusión offline de todo el archivo para mostrar en los gráficos
-    function recalculateOfflineFusion() {
-        if (csvData.length === 0) return;
-        
-        // Limpiar orientaciones e integrar de forma acumulativa
-        let offlineRollAcc = 0, offlinePitchAcc = 0;
-        let offlineRollGyro = 0, offlinePitchGyro = 0, offlineYawGyro = 0;
-        let offlineRollFilter = 0, offlinePitchFilter = 0;
-        
-        const listPitchAcc = [];
-        const listPitchGyro = [];
-        const listPitchFilter = [];
-        const listYawGyro = [];
-        
-        const timestamps = csvData.map(d => d.timestamp);
-        
-        // Primera muestra
-        const d0 = csvData[0];
-        offlineRollAcc = Math.atan2(d0.acc_y, d0.acc_z);
-        offlinePitchAcc = Math.atan2(-d0.acc_x, Math.sqrt(d0.acc_y * d0.acc_y + d0.acc_z * d0.acc_z));
-        offlineRollFilter = offlineRollAcc;
-        offlinePitchFilter = offlinePitchAcc;
-
-        listPitchAcc.push(offlinePitchAcc * (180 / Math.PI));
-        listPitchGyro.push(0);
-        listPitchFilter.push(offlinePitchFilter * (180 / Math.PI));
-        listYawGyro.push(0);
-        
-        for (let i = 1; i < csvData.length; i++) {
-            const d = csvData[i];
-            const dt = d.timestamp - timestamps[i-1];
-            
-            // Acc
-            offlineRollAcc = Math.atan2(d.acc_y, d.acc_z);
-            offlinePitchAcc = Math.atan2(-d.acc_x, Math.sqrt(d.acc_y * d.acc_y + d.acc_z * d.acc_z));
-            
-            // Gyro (bias corregido)
-            const gx_val = d.gyr_x - gyroBias.x;
-            const gy_val = d.gyr_y - gyroBias.y;
-            const gz_val = d.gyr_z - gyroBias.z;
-            
-            offlineRollGyro += gx_val * dt;
-            offlinePitchGyro += gy_val * dt;
-            offlineYawGyro += gz_val * dt;
-            
-            // Filter
-            offlineRollFilter = alpha * (offlineRollFilter + gx_val * dt) + (1 - alpha) * offlineRollAcc;
-            offlinePitchFilter = alpha * (offlinePitchFilter + gy_val * dt) + (1 - alpha) * offlinePitchAcc;
-            
-            listPitchAcc.push(offlinePitchAcc * (180 / Math.PI));
-            listPitchGyro.push(offlinePitchGyro * (180 / Math.PI));
-            listPitchFilter.push(offlinePitchFilter * (180 / Math.PI));
-            listYawGyro.push(offlineYawGyro * (180 / Math.PI));
-        }
-
-        // Cargar gráficos de fusión
-        const timestampsFormatted = csvData.map(d => (d.timestamp - csvData[0].timestamp).toFixed(2) + "s");
-        chartFusionPitch.data.labels = timestampsFormatted;
-        chartFusionPitch.data.datasets[0].data = listPitchAcc;
-        chartFusionPitch.data.datasets[1].data = listPitchGyro;
-        chartFusionPitch.data.datasets[2].data = listPitchFilter;
-        chartFusionPitch.update();
-        
-        chartFusionYaw.data.labels = timestampsFormatted;
-        chartFusionYaw.data.datasets[0].data = listYawGyro;
-        chartFusionYaw.update();
-        
-        console.log("[OFFLINE] Fusión recalculada con alpha =", alpha);
-    }
-
     // === Control de la Línea de Reproducción (Cursor) ===
     function updateChartsPlaybackLine(index) {
         const timeLabel = (csvData[index].timestamp - csvData[0].timestamp).toFixed(2) + "s";
         
         // Agregar configuración de línea vertical para Chart.js
-        [chartAcc, chartGyr, chartFusionPitch, chartFusionYaw].forEach(chart => {
+        [chartAcc, chartGyr].forEach(chart => {
             if (!chart.config.options.plugins.verticalLine) {
                 chart.config.options.plugins.verticalLine = {};
             }
@@ -934,7 +1044,15 @@ document.addEventListener("DOMContentLoaded", () => {
         isPlaying = true;
         btnPlay.innerHTML = `<i class="fa-solid fa-pause"></i>`;
         
-        const targetFps = 10; // Datos a 10Hz
+        // El fps de reproducción se deriva del espaciado real entre muestras
+        // del archivo cargado (que depende de la Fs elegida en "Fs grabación"),
+        // en vez de asumir siempre 10Hz. Así un archivo a 50Hz se reproduce
+        // a su velocidad real y no 5x más lento de lo que debería.
+        let targetFps = 10;
+        if (csvData.length >= 2) {
+            const dtDatos = csvData[1].timestamp - csvData[0].timestamp;
+            if (dtDatos > 0) targetFps = 1 / dtDatos;
+        }
         const intervalMs = (1000 / targetFps) / playbackSpeed;
         
         playbackInterval = setInterval(() => {

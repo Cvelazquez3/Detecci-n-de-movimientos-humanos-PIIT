@@ -9,7 +9,7 @@ G = np.array([
         [0,  0,  0,  0,  1, -1]
     ], dtype=float) # Definida como float por si requieres operaciones con decimales después
 
-def ejecutar_pipeline_completo(carpeta_origen=r"C:\Users\LEGION\Downloads\Archivos (60s)", archivo_csv_intermedio="Promedios.csv"):
+def ejecutar_pipeline_completo(carpeta_origen=r"C:\Proyecto IMU´S PIIT\Pruebas semana II\10Hz)", archivo_csv_intermedio="Promedios.csv"):
     print("======================================================================")
     print("INICIANDO PIPELINE AUTOMATIZADO DE PROCESAMIENTO MATRICIAL")
     print("======================================================================\n")
