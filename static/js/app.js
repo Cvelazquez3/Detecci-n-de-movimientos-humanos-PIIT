@@ -108,6 +108,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const calibMatrixC = document.getElementById("calib-matrix-c");
     const calibVectorB = document.getElementById("calib-vector-b");
     const calibVerificacionTabla = document.getElementById("calib-verificacion-tabla");
+    const calibSustitucionCard = document.getElementById("calib-sustitucion-card");
+    const calibSustitucionTabla = document.getElementById("calib-sustitucion-tabla");
     const calibToggleVivo = document.getElementById("calib-toggle-vivo");
     let ultimoResultadoCalibracion = null;
 
@@ -663,6 +665,7 @@ document.addEventListener("DOMContentLoaded", () => {
         calibErrorBox.classList.remove("hidden");
         calibResultadoCard.classList.add("hidden");
         calibVerificacionCard.classList.add("hidden");
+        calibSustitucionCard.classList.add("hidden");
     }
 
     function formatearNumero(n) {
@@ -696,6 +699,17 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         calibVerificacionTabla.innerHTML = filasV;
         calibVerificacionCard.classList.remove("hidden");
+
+        // Verificación por sustitución (C y b aplicados de vuelta a los datos crudos)
+        const sust = resultado.verificacion_sustitucion;
+        let filasS = "<tr><th>Posición</th><th>Calibrado (m/s²)</th><th>Ideal (m/s²)</th><th>Error (m/s²)</th></tr>";
+        for (const pos of ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]) {
+            const v = sust[pos];
+            const fmt3 = arr => arr.map(x => x.toFixed(4)).join(", ");
+            filasS += `<tr><td>${pos}</td><td>${fmt3(v.calibrado_ms2)}</td><td>${fmt3(v.ideal_ms2)}</td><td>${fmt3(v.error_ms2)}</td></tr>`;
+        }
+        calibSustitucionTabla.innerHTML = filasS;
+        calibSustitucionCard.classList.remove("hidden");
     }
 
     btnCalibProcesar.addEventListener("click", () => {
@@ -791,13 +805,33 @@ document.addEventListener("DOMContentLoaded", () => {
         valAzCal.innerText = data.acc_z_cal.toFixed(3);
     }
 
+    function renderizarResultadoBasico(C, b_a, fs_hz) {
+        ultimoResultadoCalibracion = { C, b_a, fs_hz };
+
+        let filasC = "";
+        for (let i = 0; i < 3; i++) {
+            filasC += "<tr>" + C[i].map(v => `<td>${formatearNumero(v)}</td>`).join("") + "</tr>";
+        }
+        calibMatrixC.innerHTML = filasC;
+
+        const etiquetasEjes = ["x", "y", "z"];
+        calibVectorB.innerHTML = b_a.map((v, i) => `<tr><td>b_${etiquetasEjes[i]}</td><td>${formatearNumero(v)}</td></tr>`).join("");
+
+        calibResultadoCard.classList.remove("hidden");
+        // La verificación (fórmula de pares / sustitución) solo está disponible
+        // justo después de procesar; en una calibración cargada de disco no se
+        // recalcula, así que esas dos tarjetas se dejan ocultas.
+    }
+
     // Al cargar la página, reflejar si el servidor ya tiene una calibración activa
+    // (persistida en disco) — no hace falta volver a subir los 6 CSV.
     fetch("/api/calibracion/estado")
         .then(res => res.json())
         .then(data => {
-            if (data.tiene_calibracion && data.aplicar_calibracion_en_vivo) {
-                calibToggleVivo.checked = true;
-                actualizarBadgeCalibracionVivo(true);
+            if (data.tiene_calibracion) {
+                renderizarResultadoBasico(data.C, data.b_a, data.fs_hz);
+                calibToggleVivo.checked = !!data.aplicar_calibracion_en_vivo;
+                actualizarBadgeCalibracionVivo(!!data.aplicar_calibracion_en_vivo);
             }
         })
         .catch(() => {});

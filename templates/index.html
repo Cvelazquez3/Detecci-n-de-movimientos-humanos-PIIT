@@ -371,6 +371,20 @@
                         </p>
                         <table class="calib-matrix-table" id="calib-verificacion-tabla"></table>
                     </div>
+
+                    <div class="card col-12 hidden" id="calib-sustitucion-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-arrows-rotate text-accent"></i> Verificación por Sustitución (C y b aplicados de vuelta)</h3>
+                        </div>
+                        <p class="description">
+                            Se toma la <strong>misma</strong> matriz C y bias b ya calculados, se aplican a
+                            los datos crudos de cada una de las 6 posiciones (a<sub>cal</sub> = C·a<sub>med</sub> + b),
+                            y se compara contra el valor ideal. El error no llega a cero exacto porque C y b
+                            son la solución de mínimos cuadrados que minimiza el error total de las 6 posiciones
+                            a la vez, no un ajuste perfecto a una sola.
+                        </p>
+                        <table class="calib-matrix-table" id="calib-sustitucion-tabla"></table>
+                    </div>
                 </div>
             </section>
         </main>

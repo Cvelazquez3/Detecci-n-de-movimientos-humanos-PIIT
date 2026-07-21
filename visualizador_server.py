@@ -555,6 +555,45 @@ CALIB_G = np.array([
 calibracion_activa = None          # {"C": np.array(3x3), "b_a": np.array(3,), "fs_hz": float}
 aplicar_calibracion_en_vivo = False  # si True, el stream SSE agrega acc_x_cal, etc.
 
+# La calibracion se guarda en disco para no tener que volver a subir los 6
+# CSV cada vez: C y b_a son constantes fijas una vez calculadas; lo unico
+# que cambia en tiempo real son las lecturas crudas que se le aplican.
+CALIB_JSON_PATH = os.path.join(WORKSPACE_DIR, "calibracion.json")
+
+
+def _guardar_calibracion_en_disco(C, b_a, fs_hz):
+    with open(CALIB_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump({
+            "C": C.tolist(),
+            "b_a": b_a.tolist(),
+            "fs_hz": fs_hz,
+            "unidad": "m/s^2",
+        }, f, indent=2, ensure_ascii=False)
+
+
+def _cargar_calibracion_de_disco():
+    if not os.path.exists(CALIB_JSON_PATH):
+        return None
+    try:
+        with open(CALIB_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "C": np.array(data["C"]),
+            "b_a": np.array(data["b_a"]),
+            "fs_hz": data.get("fs_hz"),
+        }
+    except Exception as e:
+        print(f"[CALIB] No se pudo cargar {CALIB_JSON_PATH}: {e}")
+        return None
+
+
+# Cargar automaticamente al iniciar el servidor, si ya existe una calibracion
+# guardada de una sesion anterior
+calibracion_activa = _cargar_calibracion_de_disco()
+if calibracion_activa is not None:
+    print(f"[CALIB] Calibracion previa cargada desde {CALIB_JSON_PATH} "
+          f"(C diagonal ~ {calibracion_activa['C'][0][0]:.3f}, {calibracion_activa['C'][1][1]:.3f}, {calibracion_activa['C'][2][2]:.3f})")
+
 
 def _detectar_posicion(nombre_archivo):
     """
@@ -705,8 +744,26 @@ def calibracion_procesar():
         b = -s * (m_mas + m_menos) / 2
         verificacion[eje] = {"escala": s, "bias_ms2": b}
 
-    # Guardar como calibracion activa (disponible para aplicar en vivo)
+    # Verificacion por sustitucion: aplicar la C y b_a YA CALCULADAS de vuelta
+    # a los datos crudos de cada una de las 6 posiciones, y comparar contra
+    # el valor ideal (misma idea que calculo_promedios.py extendido, pero
+    # para las 6 posiciones en vez de solo +X,+Y,+Z).
+    verificacion_sustitucion = {}
+    for i, pos in enumerate(CALIB_ORDEN_POSICIONES):
+        crudo_g = np.array(detalles[pos]["promedio_g"])
+        cal_ms2 = C @ crudo_g + b_a
+        ideal_ms2 = CALIB_G[:, i]
+        verificacion_sustitucion[pos] = {
+            "crudo_g": crudo_g.tolist(),
+            "calibrado_ms2": cal_ms2.tolist(),
+            "ideal_ms2": ideal_ms2.tolist(),
+            "error_ms2": (cal_ms2 - ideal_ms2).tolist(),
+        }
+
+    # Guardar como calibracion activa (disponible para aplicar en vivo) y
+    # persistir en disco para no depender de volver a subir los CSV
     calibracion_activa = {"C": C, "b_a": b_a, "fs_hz": fs_hz}
+    _guardar_calibracion_en_disco(C, b_a, fs_hz)
 
     return jsonify({
         "status": "ok",
@@ -717,6 +774,7 @@ def calibracion_procesar():
         "b_a": b_a.tolist(),
         "detalles_por_posicion": detalles,
         "verificacion_formula_pares": verificacion,
+        "verificacion_sustitucion": verificacion_sustitucion,
     })
 
 
@@ -740,6 +798,8 @@ def calibracion_estado():
         "tiene_calibracion": calibracion_activa is not None,
         "aplicar_calibracion_en_vivo": aplicar_calibracion_en_vivo,
         "fs_hz": calibracion_activa["fs_hz"] if calibracion_activa else None,
+        "C": calibracion_activa["C"].tolist() if calibracion_activa else None,
+        "b_a": calibracion_activa["b_a"].tolist() if calibracion_activa else None,
     })
 
 
