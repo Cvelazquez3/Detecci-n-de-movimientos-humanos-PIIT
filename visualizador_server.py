@@ -216,19 +216,37 @@ ble_manager = BLEManager()
 
 def _agregar_campos_calibrados(payload):
     """
-    Si hay una calibracion activa (calculada en la pestaña Calibracion) y el
-    usuario activo 'aplicar calibracion en vivo', agrega campos EXTRA
-    (acc_x_cal, acc_y_cal, acc_z_cal, en m/s^2) al payload sin tocar los
-    originales (acc_x, acc_y, acc_z, que siguen en g). Asi la vista en vivo
-    "cruda" no cambia de comportamiento a menos que el usuario lo pida.
+    Si hay una calibracion activa (calculada en la pestaña Calibracion), calcula
+    la aceleracion calibrada (m/s^2). Si el usuario activo 'aplicar calibracion
+    en vivo', agrega campos EXTRA (acc_x_cal, acc_y_cal, acc_z_cal) al payload
+    sin tocar los originales (acc_x, acc_y, acc_z, que siguen en g). Asi la
+    vista en vivo "cruda" no cambia de comportamiento a menos que el usuario
+    lo pida.
+
+    Si ademas hay una nivelacion de montaje activa (matriz R, ver seccion 1
+    del documento de nivelacion / formula de Rodrigues) y el usuario activo
+    'aplicar nivelacion en vivo', agrega tambien los campos en el marco del
+    cuerpo (acc_x_body/y/z en m/s^2, gyr_x_body/y/z en rad/s): R se aplica
+    por igual al acelerometro ya calibrado y al giroscopio crudo (el bias del
+    giroscopio aun no esta integrado en la interfaz web, ver PENDIENTES).
     """
-    if not aplicar_calibracion_en_vivo or calibracion_activa is None:
+    if calibracion_activa is None:
         return
     acc_g = np.array([payload['acc_x'], payload['acc_y'], payload['acc_z']])
     C = calibracion_activa["C"]
     b_a = calibracion_activa["b_a"]
     acc_cal_ms2 = C @ acc_g + b_a
-    payload['acc_x_cal'], payload['acc_y_cal'], payload['acc_z_cal'] = acc_cal_ms2.tolist()
+
+    if aplicar_calibracion_en_vivo:
+        payload['acc_x_cal'], payload['acc_y_cal'], payload['acc_z_cal'] = acc_cal_ms2.tolist()
+
+    if aplicar_nivelacion_en_vivo and nivelacion_activa is not None:
+        R = nivelacion_activa["R"]
+        acc_body = R @ acc_cal_ms2
+        gyr_raw = np.array([payload['gyr_x'], payload['gyr_y'], payload['gyr_z']])
+        gyr_body = R @ gyr_raw
+        payload['acc_x_body'], payload['acc_y_body'], payload['acc_z_body'] = acc_body.tolist()
+        payload['gyr_x_body'], payload['gyr_y_body'], payload['gyr_z_body'] = gyr_body.tolist()
 
 # Simulador de SensorTag
 simulating = False
@@ -802,6 +820,204 @@ def calibracion_estado():
         "b_a": calibracion_activa["b_a"].tolist() if calibracion_activa else None,
     })
 
+
+
+# ---------------------------------------------------------------------------
+# Nivelacion de montaje (formula de Rodrigues) - ver seccion 1 del documento
+# de nivelacion (calibracion_MPU_CC2650, seccion "Nivelacion de montaje").
+#
+# La calibracion de arriba (C, b_a) corrige los defectos internos del sensor
+# (escala, acoplamiento cruzado, bias), pero no sabe como esta orientado el
+# sensor respecto al marco del laboratorio. Eso se corrige aparte, DESPUES de
+# calibrar: se sube un CSV con el sensor en reposo ya en su posicion final de
+# montaje, se promedia la aceleracion YA CALIBRADA de los primeros segundos
+# (estimacion de la direccion de la gravedad vista desde el sensor) y se
+# calcula, via la formula de Rodrigues, la matriz de rotacion R que lleva esa
+# direccion al eje Z: R se aplica por igual al acelerometro calibrado y al
+# giroscopio (a_body = R(M a_raw + b), w_body = R(w_raw - b_g)).
+# ---------------------------------------------------------------------------
+NIVELACION_JSON_PATH = os.path.join(WORKSPACE_DIR, "nivelacion.json")
+NIVEL_SEGUNDOS_DEFAULT = 2.0
+
+nivelacion_activa = None            # {"R": np.array(3x3)} o None si no se ha calculado
+aplicar_nivelacion_en_vivo = False  # si True, el stream SSE agrega acc_x_body/gyr_x_body, etc.
+
+
+def _rodrigues(k, theta):
+    """Construye la matriz de rotacion R = I + sin(theta)K + (1-cos(theta))K^2."""
+    kx, ky, kz = k
+    K = np.array([[0, -kz, ky],
+                  [kz, 0, -kx],
+                  [-ky, kx, 0]], dtype=float)
+    return np.eye(3) + math.sin(theta) * K + (1 - math.cos(theta)) * (K @ K)
+
+
+def _calcular_R_nivelacion(g_prom):
+    """
+    g_prom: vector 3 de la aceleracion promedio YA CALIBRADA (m/s^2), con el
+    sensor en reposo. Devuelve R tal que R @ (g_prom/||g_prom||) ~= (0,0,1).
+    """
+    norma = np.linalg.norm(g_prom)
+    if norma < 1e-9:
+        raise ValueError("La aceleracion promedio es practicamente cero; no se puede nivelar con estos datos.")
+    u = g_prom / norma
+    v = np.array([0.0, 0.0, 1.0])
+    eje = np.cross(u, v)
+    s = np.linalg.norm(eje)
+    c = float(np.dot(u, v))
+    if s < 1e-12:
+        if c > 0:
+            # Vectores ya alineados (theta ~ 0)
+            R = np.eye(3)
+        else:
+            # Antiparalelos (theta ~ 180): girar 180 grados alrededor de
+            # cualquier eje perpendicular a u (ver seccion 1.4 del documento)
+            perp = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+            eje_perp = np.cross(u, perp)
+            eje_perp = eje_perp / np.linalg.norm(eje_perp)
+            R = _rodrigues(eje_perp, math.pi)
+    else:
+        theta = math.atan2(s, c)
+        R = _rodrigues(eje / s, theta)
+    return R
+
+
+def _guardar_nivelacion_en_disco(R):
+    with open(NIVELACION_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump({"R": R.tolist()}, f, indent=2, ensure_ascii=False)
+
+
+def _cargar_nivelacion_de_disco():
+    if not os.path.exists(NIVELACION_JSON_PATH):
+        return None
+    try:
+        with open(NIVELACION_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {"R": np.array(data["R"])}
+    except Exception as e:
+        print(f"[NIVEL] No se pudo cargar {NIVELACION_JSON_PATH}: {e}")
+        return None
+
+
+# Cargar automaticamente al iniciar el servidor, si ya existe una nivelacion
+# guardada de una sesion anterior
+nivelacion_activa = _cargar_nivelacion_de_disco()
+if nivelacion_activa is not None:
+    print(f"[NIVEL] Nivelacion de montaje previa cargada desde {NIVELACION_JSON_PATH}")
+
+
+@app.route('/api/nivelacion/procesar', methods=['POST'])
+def nivelacion_procesar():
+    """
+    Espera un form-data con:
+      - 'archivo': un unico CSV con el sensor en reposo, ya en su posicion
+        final de montaje (NO tiene que ser ninguna de las 6 posiciones de
+        la calibracion de arriba).
+      - 'fs' (Hz, opcional, default 10): frecuencia de muestreo de la captura.
+      - 'segundos' (opcional, default 2): cuantos segundos iniciales
+        promediar para estimar la direccion de la gravedad.
+    Requiere que ya exista una calibracion de acelerometro procesada (C, b_a):
+    la nivelacion se calcula sobre la aceleracion YA CALIBRADA.
+    """
+    global nivelacion_activa
+
+    if calibracion_activa is None:
+        return jsonify({
+            "error": "Primero hay que procesar la calibracion del acelerometro (arriba); "
+                     "la nivelacion se calcula sobre datos ya calibrados."
+        }), 400
+
+    archivo = request.files.get('archivo')
+    if archivo is None or not archivo.filename:
+        return jsonify({"error": "No se recibio ningun archivo. Selecciona el CSV con el sensor en reposo."}), 400
+
+    fs_hz = float(request.form.get('fs', DEFAULT_FREQ_HZ))
+    if fs_hz <= 0:
+        return jsonify({"error": "La frecuencia (fs) debe ser mayor que 0"}), 400
+
+    segundos = float(request.form.get('segundos', NIVEL_SEGUNDOS_DEFAULT))
+    if segundos <= 0:
+        return jsonify({"error": "Los segundos a promediar deben ser mayores que 0"}), 400
+
+    try:
+        df = pd.read_csv(archivo)
+    except Exception as e:
+        return jsonify({"error": f"No se pudo leer el archivo: {e}"}), 400
+
+    if {"acc_x", "acc_y", "acc_z"}.issubset(df.columns):
+        columnas = ["acc_x", "acc_y", "acc_z"]
+    elif df.shape[1] >= 3:
+        columnas = df.columns[:3].tolist()
+    else:
+        return jsonify({"error": "El archivo no tiene al menos 3 columnas de aceleracion"}), 400
+
+    n_muestras = max(1, int(round(fs_hz * segundos)))
+    if n_muestras > len(df):
+        return jsonify({
+            "error": f"La captura tiene {len(df)} muestras, no alcanza para promediar "
+                     f"{segundos}s a {fs_hz}Hz ({n_muestras} muestras)."
+        }), 400
+
+    ventana = df.iloc[:n_muestras]
+    promedio_crudo_g = ventana[columnas].mean().to_numpy(dtype=float)
+
+    # Aplicar la calibracion YA calculada (C, b_a) al promedio crudo. Al ser
+    # una transformacion afin, promediar-y-luego-calibrar da lo mismo que
+    # calibrar-y-luego-promediar.
+    C = calibracion_activa["C"]
+    b_a = calibracion_activa["b_a"]
+    g_prom = C @ promedio_crudo_g + b_a  # m/s^2, aceleracion promedio calibrada
+
+    try:
+        R = _calcular_R_nivelacion(g_prom)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    g_rotado = R @ g_prom
+    magnitud = float(np.linalg.norm(g_prom))
+
+    # Chequeos descritos en la seccion 1.5 del documento: roll/pitch iniciales
+    # calculados a partir de la gravedad ya rotada deben salir ~0 grados.
+    roll_deg = math.degrees(math.atan2(g_rotado[1], g_rotado[2]))
+    pitch_deg = math.degrees(math.atan2(-g_rotado[0], math.sqrt(g_rotado[1] ** 2 + g_rotado[2] ** 2)))
+
+    nivelacion_activa = {"R": R}
+    _guardar_nivelacion_en_disco(R)
+
+    return jsonify({
+        "status": "ok",
+        "R": R.tolist(),
+        "muestras_usadas": n_muestras,
+        "promedio_crudo_g": promedio_crudo_g.tolist(),
+        "g_promedio_calibrado_ms2": g_prom.tolist(),
+        "g_rotado_ms2": g_rotado.tolist(),
+        "magnitud_g_ms2": magnitud,
+        "roll_deg": roll_deg,
+        "pitch_deg": pitch_deg,
+    })
+
+
+@app.route('/api/nivelacion/aplicar', methods=['POST'])
+def nivelacion_aplicar():
+    """Activa/desactiva que el stream en vivo (SSE) incluya campos en el marco del cuerpo."""
+    global aplicar_nivelacion_en_vivo
+    req = request.json or {}
+    activar = bool(req.get("activar", False))
+
+    if activar and (nivelacion_activa is None or calibracion_activa is None):
+        return jsonify({"error": "Aun no se ha calculado la nivelacion (o falta la calibracion del acelerometro)."}), 400
+
+    aplicar_nivelacion_en_vivo = activar
+    return jsonify({"status": "ok", "aplicar_nivelacion_en_vivo": aplicar_nivelacion_en_vivo})
+
+
+@app.route('/api/nivelacion/estado')
+def nivelacion_estado():
+    return jsonify({
+        "tiene_nivelacion": nivelacion_activa is not None,
+        "aplicar_nivelacion_en_vivo": aplicar_nivelacion_en_vivo,
+        "R": nivelacion_activa["R"].tolist() if nivelacion_activa else None,
+    })
 
 
 @app.route('/api/stream')

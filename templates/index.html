@@ -12,6 +12,18 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Archivo CSS local -->
     <link rel="stylesheet" href="/static/css/style.css">
+    <!-- Aplica el tema guardado ANTES de pintar la pagina, para evitar un
+         parpadeo del tema por defecto (claro) al recargar en modo oscuro -->
+    <script>
+        (function () {
+            try {
+                var tema = localStorage.getItem("imu_visualizer_theme");
+                if (tema === "dark" || tema === "light") {
+                    document.documentElement.setAttribute("data-theme", tema);
+                }
+            } catch (e) { /* localStorage no disponible, se queda en tema claro */ }
+        })();
+    </script>
 </head>
 <body>
     <div class="app-container">
@@ -23,6 +35,9 @@
                     <h1>IMU Visualizer</h1>
                     <span>PIIT - Deriva & Trayectoria</span>
                 </div>
+                <button type="button" id="btn-theme-toggle" class="btn-theme-toggle" title="Cambiar a tema oscuro">
+                    <i class="fa-solid fa-moon"></i>
+                </button>
             </div>
             
             <nav class="nav-menu">
@@ -252,6 +267,49 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Telemetria en el marco del cuerpo (nivelada), alimentada por la
+                         nivelacion de montaje (formula de Rodrigues) de la pestaña Calibración -->
+                    <div class="card col-12 telemetry-card" id="nivel-live-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-compass text-primary"></i> Marco del Cuerpo (Nivelado)</h3>
+                            <div class="sensor-mode-badge" id="nivel-live-badge">Sin nivelación aplicada</div>
+                        </div>
+                        <div class="telemetry-section">
+                            <h4>Acelerómetro nivelado (m/s²)</h4>
+                            <div class="telemetry-grid">
+                                <div class="telemetry-item axis-x">
+                                    <span class="label">Acc X</span>
+                                    <span class="value" id="val-ax-body">0.000</span>
+                                </div>
+                                <div class="telemetry-item axis-y">
+                                    <span class="label">Acc Y</span>
+                                    <span class="value" id="val-ay-body">0.000</span>
+                                </div>
+                                <div class="telemetry-item axis-z">
+                                    <span class="label">Acc Z</span>
+                                    <span class="value" id="val-az-body">0.000</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="telemetry-section">
+                            <h4>Giroscopio nivelado (rad/s)</h4>
+                            <div class="telemetry-grid">
+                                <div class="telemetry-item axis-x">
+                                    <span class="label">&alpha;</span>
+                                    <span class="value" id="val-gx-body">0.000</span>
+                                </div>
+                                <div class="telemetry-item axis-y">
+                                    <span class="label">&beta;</span>
+                                    <span class="value" id="val-gy-body">0.000</span>
+                                </div>
+                                <div class="telemetry-item axis-z">
+                                    <span class="label">&gamma;</span>
+                                    <span class="value" id="val-gz-body">0.000</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -384,6 +442,82 @@
                             a la vez, no un ajuste perfecto a una sola.
                         </p>
                         <table class="calib-matrix-table" id="calib-sustitucion-tabla"></table>
+                    </div>
+
+                    <!-- Nivelacion de montaje (formula de Rodrigues) -->
+                    <div class="card col-12">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-compass text-accent"></i> Nivelación de Montaje (Fórmula de Rodrigues)</h3>
+                        </div>
+                        <p class="description">
+                            Corrige cómo está orientado el sensor respecto al marco del laboratorio,
+                            <strong>después</strong> de la calibración de arriba. Sube un CSV con el sensor en
+                            reposo, ya en su posición final de montaje (no tiene que ser ninguna de las 6
+                            posiciones de calibración); se promedia la aceleración <strong>ya calibrada</strong>
+                            de los primeros segundos para estimar la dirección de la gravedad, y se calcula
+                            la rotación <strong>R</strong> que la alinea con el eje Z. R se aplica por igual
+                            al acelerómetro calibrado y al giroscopio.
+                        </p>
+
+                        <div class="calib-controls-row nivel-controls-row">
+                            <div class="calib-folder-picker">
+                                <label for="nivel-archivo-input" class="btn btn-secondary">
+                                    <i class="fa-solid fa-file-arrow-up"></i> Seleccionar CSV en reposo
+                                </label>
+                                <input type="file" id="nivel-archivo-input" accept=".csv" class="hidden">
+                                <div class="calib-folder-lista" id="nivel-archivo-nombre">Ningún archivo seleccionado.</div>
+                            </div>
+
+                            <div class="nivel-inputs">
+                                <label class="nivel-input-label">
+                                    Fs de la captura (Hz)
+                                    <input type="number" id="nivel-fs-input" min="1" step="1" value="10">
+                                </label>
+                                <label class="nivel-input-label">
+                                    Segundos iniciales a promediar
+                                    <input type="number" id="nivel-segundos-input" min="0.1" step="0.1" value="2">
+                                </label>
+                            </div>
+
+                            <button id="btn-nivel-procesar" class="btn btn-primary" disabled>
+                                <i class="fa-solid fa-compass"></i> Calcular R
+                            </button>
+                        </div>
+
+                        <div class="calib-error hidden" id="nivel-error-box">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span id="nivel-error-text"></span>
+                        </div>
+                    </div>
+
+                    <div class="card col-6 hidden" id="nivel-resultado-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-table-cells text-primary"></i> Matriz de Rotación R</h3>
+                        </div>
+                        <table class="calib-matrix-table" id="nivel-matrix-r"></table>
+
+                        <div class="calib-toggle-row">
+                            <label class="calib-toggle-switch">
+                                <input type="checkbox" id="nivel-toggle-vivo">
+                                <span class="calib-toggle-slider"></span>
+                            </label>
+                            <span>Aplicar esta nivelación a la vista en vivo</span>
+                        </div>
+
+                        <button id="btn-nivel-descargar" class="btn btn-secondary btn-sm calib-download-btn">
+                            <i class="fa-solid fa-download"></i> Descargar R (JSON)
+                        </button>
+                    </div>
+
+                    <div class="card col-6 hidden" id="nivel-verificacion-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-check-double text-accent"></i> Verificación</h3>
+                        </div>
+                        <p class="description">
+                            Tras rotar, la gravedad promedio debe quedar ≈ (0, 0, 9.81) m/s² y el roll/pitch
+                            iniciales calculados deben salir ≈ 0° por construcción.
+                        </p>
+                        <table class="calib-matrix-table" id="nivel-verificacion-tabla"></table>
                     </div>
                 </div>
             </section>

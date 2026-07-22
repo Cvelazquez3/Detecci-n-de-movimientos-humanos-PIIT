@@ -119,6 +119,32 @@ document.addEventListener("DOMContentLoaded", () => {
     const valAyCal = document.getElementById("val-ay-cal");
     const valAzCal = document.getElementById("val-az-cal");
 
+    // === Nivelación de montaje (fórmula de Rodrigues) ===
+    let nivelArchivoSeleccionado = null;
+    let ultimoResultadoNivelacion = null;
+    const nivelArchivoInput = document.getElementById("nivel-archivo-input");
+    const nivelArchivoNombre = document.getElementById("nivel-archivo-nombre");
+    const nivelFsInput = document.getElementById("nivel-fs-input");
+    const nivelSegundosInput = document.getElementById("nivel-segundos-input");
+    const btnNivelProcesar = document.getElementById("btn-nivel-procesar");
+    const btnNivelDescargar = document.getElementById("btn-nivel-descargar");
+    const nivelErrorBox = document.getElementById("nivel-error-box");
+    const nivelErrorText = document.getElementById("nivel-error-text");
+    const nivelResultadoCard = document.getElementById("nivel-resultado-card");
+    const nivelVerificacionCard = document.getElementById("nivel-verificacion-card");
+    const nivelMatrixR = document.getElementById("nivel-matrix-r");
+    const nivelVerificacionTabla = document.getElementById("nivel-verificacion-tabla");
+    const nivelToggleVivo = document.getElementById("nivel-toggle-vivo");
+
+    // Panel de telemetría nivelada en vivo (Dashboard, marco del cuerpo)
+    const nivelLiveBadge = document.getElementById("nivel-live-badge");
+    const valAxBody = document.getElementById("val-ax-body");
+    const valAyBody = document.getElementById("val-ay-body");
+    const valAzBody = document.getElementById("val-az-body");
+    const valGxBody = document.getElementById("val-gx-body");
+    const valGyBody = document.getElementById("val-gy-body");
+    const valGzBody = document.getElementById("val-gz-body");
+
     // === Control de Pestañas ===
     navButtons.forEach(btn => {
         btn.addEventListener("click", () => {
@@ -274,11 +300,11 @@ document.addEventListener("DOMContentLoaded", () => {
         maintainAspectRatio: false,
         scales: {
             x: {
-                grid: { color: "rgba(255, 255, 255, 0.05)" },
+                grid: { color: varColor("--chart-grid") },
                 ticks: { color: varColor("--text-muted"), font: { family: "Outfit" } }
             },
             y: {
-                grid: { color: "rgba(255, 255, 255, 0.05)" },
+                grid: { color: varColor("--chart-grid") },
                 ticks: { color: varColor("--text-muted"), font: { family: "Outfit" } },
                 title: { display: true, text: yLabel, color: varColor("--text-main"), font: { family: "Outfit", size: 12 } }
             }
@@ -301,9 +327,9 @@ document.addEventListener("DOMContentLoaded", () => {
         data: {
             labels: [],
             datasets: [
-                { label: "Acc X", data: [], borderColor: "#ff4757", backgroundColor: "rgba(255, 71, 87, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 },
-                { label: "Acc Y", data: [], borderColor: "#2ed573", backgroundColor: "rgba(46, 213, 115, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 },
-                { label: "Acc Z", data: [], borderColor: "#1e90ff", backgroundColor: "rgba(30, 144, 255, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 }
+                { label: "Acc X", data: [], borderColor: "#ef4444", backgroundColor: "rgba(239, 68, 68, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 },
+                { label: "Acc Y", data: [], borderColor: "#16a34a", backgroundColor: "rgba(22, 163, 74, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 },
+                { label: "Acc Z", data: [], borderColor: "#2563eb", backgroundColor: "rgba(37, 99, 235, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 }
             ]
         },
         options: chartOptions("Aceleración (g)")
@@ -316,13 +342,60 @@ document.addEventListener("DOMContentLoaded", () => {
         data: {
             labels: [],
             datasets: [
-                { label: "α (alpha)", data: [], borderColor: "#ff4757", backgroundColor: "rgba(255, 71, 87, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 },
-                { label: "β (beta)", data: [], borderColor: "#2ed573", backgroundColor: "rgba(46, 213, 115, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 },
-                { label: "γ (gamma)", data: [], borderColor: "#1e90ff", backgroundColor: "rgba(30, 144, 255, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 }
+                { label: "α (alpha)", data: [], borderColor: "#ef4444", backgroundColor: "rgba(239, 68, 68, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 },
+                { label: "β (beta)", data: [], borderColor: "#16a34a", backgroundColor: "rgba(22, 163, 74, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 },
+                { label: "γ (gamma)", data: [], borderColor: "#2563eb", backgroundColor: "rgba(37, 99, 235, 0.1)", borderWidth: 2, pointRadius: 0, tension: 0.1 }
             ]
         },
         options: chartOptions("Velocidad Angular (rad/s)")
     });
+
+    // === Botón de tema claro / oscuro ===
+    const THEME_STORAGE_KEY = "imu_visualizer_theme";
+    const btnThemeToggle = document.getElementById("btn-theme-toggle");
+
+    function sincronizarBotonTema(tema) {
+        if (!btnThemeToggle) return;
+        btnThemeToggle.innerHTML = tema === "dark"
+            ? `<i class="fa-solid fa-sun"></i>`
+            : `<i class="fa-solid fa-moon"></i>`;
+        btnThemeToggle.title = tema === "dark" ? "Cambiar a tema claro" : "Cambiar a tema oscuro";
+    }
+
+    function actualizarColoresGraficas() {
+        const gridColor = varColor("--chart-grid");
+        const textMuted = varColor("--text-muted");
+        const textMain = varColor("--text-main");
+        [chartAcc, chartGyr].forEach(chart => {
+            chart.options.scales.x.grid.color = gridColor;
+            chart.options.scales.x.ticks.color = textMuted;
+            chart.options.scales.y.grid.color = gridColor;
+            chart.options.scales.y.ticks.color = textMuted;
+            chart.options.scales.y.title.color = textMain;
+            chart.options.plugins.legend.labels.color = textMain;
+            chart.update();
+        });
+    }
+
+    function cambiarTema(tema) {
+        document.documentElement.setAttribute("data-theme", tema);
+        try {
+            localStorage.setItem(THEME_STORAGE_KEY, tema);
+        } catch (e) { /* localStorage no disponible, el tema no persiste */ }
+        sincronizarBotonTema(tema);
+        actualizarColoresGraficas();
+    }
+
+    // El <head> ya aplicó el tema guardado (para evitar parpadeo); aquí solo
+    // sincronizamos el icono del botón con lo que quedó activo.
+    sincronizarBotonTema(document.documentElement.getAttribute("data-theme") || "light");
+
+    if (btnThemeToggle) {
+        btnThemeToggle.addEventListener("click", () => {
+            const actual = document.documentElement.getAttribute("data-theme") || "light";
+            cambiarTema(actual === "dark" ? "light" : "dark");
+        });
+    }
 
     // === Lógica del Algoritmo de Orientación ===
     // (alimenta el cubo 3D del Dashboard: filtro complementario Roll/Pitch,
@@ -490,6 +563,7 @@ document.addEventListener("DOMContentLoaded", () => {
             
             processIMUData(data, true);
             actualizarTelemetriaCalibrada(data);
+            actualizarTelemetriaNivelada(data);
         };
         
         sseSource.onerror = (err) => {
@@ -832,6 +906,161 @@ document.addEventListener("DOMContentLoaded", () => {
                 renderizarResultadoBasico(data.C, data.b_a, data.fs_hz);
                 calibToggleVivo.checked = !!data.aplicar_calibracion_en_vivo;
                 actualizarBadgeCalibracionVivo(!!data.aplicar_calibracion_en_vivo);
+            }
+        })
+        .catch(() => {});
+
+    // === Pestaña de Calibración: Nivelación de montaje (fórmula de Rodrigues) ===
+    nivelArchivoInput.addEventListener("change", () => {
+        const f = nivelArchivoInput.files[0];
+        nivelArchivoSeleccionado = f || null;
+        nivelArchivoNombre.innerHTML = f
+            ? `<div class="calib-folder-item"><i class="fa-solid fa-file-csv"></i> ${f.name}</div>`
+            : "Ningún archivo seleccionado.";
+        btnNivelProcesar.disabled = !f;
+        nivelErrorBox.classList.add("hidden");
+    });
+
+    function mostrarErrorNivelacion(mensaje) {
+        nivelErrorText.innerText = mensaje;
+        nivelErrorBox.classList.remove("hidden");
+        nivelResultadoCard.classList.add("hidden");
+        nivelVerificacionCard.classList.add("hidden");
+    }
+
+    function renderizarResultadoNivelacion(resultado) {
+        nivelErrorBox.classList.add("hidden");
+        ultimoResultadoNivelacion = resultado;
+
+        let filasR = "";
+        for (let i = 0; i < 3; i++) {
+            filasR += "<tr>" + resultado.R[i].map(v => `<td>${formatearNumero(v)}</td>`).join("") + "</tr>";
+        }
+        nivelMatrixR.innerHTML = filasR;
+        nivelResultadoCard.classList.remove("hidden");
+        nivelToggleVivo.checked = false;  // el usuario decide activarla explícitamente
+
+        const g = resultado.g_rotado_ms2;
+        nivelVerificacionTabla.innerHTML = `
+            <tr><th>Cantidad</th><th>Valor</th></tr>
+            <tr><td>Gravedad rotada (m/s²)</td><td>${g.map(v => v.toFixed(4)).join(", ")}</td></tr>
+            <tr><td>Magnitud |g| (m/s²)</td><td>${resultado.magnitud_g_ms2.toFixed(4)}</td></tr>
+            <tr><td>Roll inicial</td><td>${resultado.roll_deg.toFixed(2)}°</td></tr>
+            <tr><td>Pitch inicial</td><td>${resultado.pitch_deg.toFixed(2)}°</td></tr>
+        `;
+        nivelVerificacionCard.classList.remove("hidden");
+    }
+
+    btnNivelProcesar.addEventListener("click", () => {
+        if (!nivelArchivoSeleccionado) {
+            mostrarErrorNivelacion("Selecciona primero el CSV con el sensor en reposo.");
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("archivo", nivelArchivoSeleccionado, nivelArchivoSeleccionado.name);
+        formData.append("fs", nivelFsInput.value || 10);
+        formData.append("segundos", nivelSegundosInput.value || 2);
+
+        btnNivelProcesar.disabled = true;
+        btnNivelProcesar.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Calculando...`;
+
+        fetch("/api/nivelacion/procesar", { method: "POST", body: formData })
+            .then(res => res.json().then(data => ({ ok: res.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok) {
+                    mostrarErrorNivelacion(data.error || "Error desconocido al calcular la nivelación.");
+                    return;
+                }
+                renderizarResultadoNivelacion(data);
+            })
+            .catch(err => mostrarErrorNivelacion("Error de conexión: " + err))
+            .finally(() => {
+                btnNivelProcesar.disabled = false;
+                btnNivelProcesar.innerHTML = `<i class="fa-solid fa-compass"></i> Calcular R`;
+            });
+    });
+
+    btnNivelDescargar.addEventListener("click", () => {
+        if (!ultimoResultadoNivelacion) return;
+        const payload = { R: ultimoResultadoNivelacion.R };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "nivelacion.json";
+        a.click();
+        URL.revokeObjectURL(url);
+    });
+
+    // Activar/desactivar que la vista en vivo muestre datos en el marco del cuerpo
+    nivelToggleVivo.addEventListener("change", () => {
+        const activar = nivelToggleVivo.checked;
+        fetch("/api/nivelacion/aplicar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ activar }),
+        })
+            .then(res => res.json().then(data => ({ ok: res.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok) {
+                    nivelToggleVivo.checked = false;
+                    mostrarErrorNivelacion(data.error || "No se pudo activar la nivelación en vivo.");
+                    return;
+                }
+                actualizarBadgeNivelacionVivo(data.aplicar_nivelacion_en_vivo);
+            });
+    });
+
+    function actualizarBadgeNivelacionVivo(activa) {
+        if (activa) {
+            nivelLiveBadge.innerText = "Nivelación aplicada";
+            nivelLiveBadge.className = "sensor-mode-badge live";
+        } else {
+            nivelLiveBadge.innerText = "Sin nivelación aplicada";
+            nivelLiveBadge.className = "sensor-mode-badge";
+            valAxBody.innerText = "0.000";
+            valAyBody.innerText = "0.000";
+            valAzBody.innerText = "0.000";
+            valGxBody.innerText = "0.000";
+            valGyBody.innerText = "0.000";
+            valGzBody.innerText = "0.000";
+        }
+    }
+
+    function actualizarTelemetriaNivelada(data) {
+        if (data.acc_x_body === undefined) {
+            if (nivelLiveBadge.innerText !== "Sin nivelación aplicada") {
+                actualizarBadgeNivelacionVivo(false);
+            }
+            return;
+        }
+        if (nivelLiveBadge.innerText !== "Nivelación aplicada") {
+            actualizarBadgeNivelacionVivo(true);
+        }
+        valAxBody.innerText = data.acc_x_body.toFixed(3);
+        valAyBody.innerText = data.acc_y_body.toFixed(3);
+        valAzBody.innerText = data.acc_z_body.toFixed(3);
+        valGxBody.innerText = data.gyr_x_body.toFixed(3);
+        valGyBody.innerText = data.gyr_y_body.toFixed(3);
+        valGzBody.innerText = data.gyr_z_body.toFixed(3);
+    }
+
+    // Al cargar la página, reflejar si el servidor ya tiene una nivelación
+    // activa (persistida en disco) — no hace falta volver a subir el CSV.
+    fetch("/api/nivelacion/estado")
+        .then(res => res.json())
+        .then(data => {
+            if (data.tiene_nivelacion) {
+                ultimoResultadoNivelacion = { R: data.R };
+                let filasR = "";
+                for (let i = 0; i < 3; i++) {
+                    filasR += "<tr>" + data.R[i].map(v => `<td>${formatearNumero(v)}</td>`).join("") + "</tr>";
+                }
+                nivelMatrixR.innerHTML = filasR;
+                nivelResultadoCard.classList.remove("hidden");
+                nivelToggleVivo.checked = !!data.aplicar_nivelacion_en_vivo;
+                actualizarBadgeNivelacionVivo(!!data.aplicar_nivelacion_en_vivo);
             }
         })
         .catch(() => {});
