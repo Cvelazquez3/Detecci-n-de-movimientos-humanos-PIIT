@@ -163,6 +163,20 @@ document.addEventListener("DOMContentLoaded", () => {
                 chartAcc.resize();
                 chartGyr.resize();
             }
+
+            // La pestaña de nivelación 3D se inicializa la primera vez que se
+            // abre (para que el contenedor ya tenga un tamaño real, no 0x0
+            // por estar oculta con display:none al cargar la página).
+            if (activeTab === "nivelacion3d") {
+                if (!nivel3dInicializado) {
+                    inicializarEscenaNivel3D();
+                } else {
+                    nivel3dSceneRefs.camera.aspect = nivel3dSceneRefs.container.clientWidth / nivel3dSceneRefs.container.clientHeight;
+                    nivel3dSceneRefs.camera.updateProjectionMatrix();
+                    nivel3dSceneRefs.renderer.setSize(nivel3dSceneRefs.container.clientWidth, nivel3dSceneRefs.container.clientHeight);
+                }
+                cargarNivel3D();
+            }
         });
     });
 
@@ -1064,6 +1078,229 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         })
         .catch(() => {});
+
+    // ========================================================================
+    // Pestaña: Comparación 3D de la Nivelación de Montaje (fórmula de Rodrigues)
+    // ========================================================================
+    let nivel3dInicializado = false;
+    let nivel3dSceneRefs = null;
+    let nivel3dAnimando = false;
+
+    const nivel3dBadge = document.getElementById("nivel3d-badge");
+    const nivel3dVacio = document.getElementById("nivel3d-vacio");
+    const nivel3dDatosDiv = document.getElementById("nivel3d-datos");
+    const nivel3dTablaComparacion = document.getElementById("nivel3d-tabla-comparacion");
+    const nivel3dTablaEje = document.getElementById("nivel3d-tabla-eje");
+    const nivel3dTablaR = document.getElementById("nivel3d-tabla-r");
+    const nivel3dSlider = document.getElementById("nivel3d-slider");
+    const nivel3dPorcentaje = document.getElementById("nivel3d-porcentaje");
+    const btnNivel3dPlay = document.getElementById("btn-nivel3d-play");
+    const btnNivel3dReset = document.getElementById("btn-nivel3d-reset");
+
+    // Convierte un vector [x,y,z] en coordenadas del sensor al sistema de
+    // coordenadas de Three.js — mismo mapeo que usa el cubo del Dashboard
+    // (sensor X -> mundo Z, sensor Y -> mundo X, sensor Z -> mundo Y/arriba).
+    function sensorAMundo(v) {
+        return new THREE.Vector3(v[1], v[2], v[0]);
+    }
+
+    // Construye un cubo "estilo SensorTag" simplificado, con sus 3 flechas de
+    // ejes (X rojo, Y verde, Z azul). opacidad < 1 lo deja semitransparente,
+    // usado para representar la orientación "cruda" del sensor.
+    function crearCuboSensorSimple(colorHex, opacidad) {
+        const grupo = new THREE.Group();
+        const bodyGeometry = new THREE.BoxGeometry(3, 0.5, 1.5);
+        const material = new THREE.MeshStandardMaterial({
+            color: colorHex, roughness: 0.6, transparent: opacidad < 1, opacity: opacidad
+        });
+        const body = new THREE.Mesh(bodyGeometry, material);
+        grupo.add(body);
+
+        const arrowX = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0), 1.5, 0xff4757, 0.3, 0.12);
+        const arrowY = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0), 2.0, 0x2ed573, 0.35, 0.14);
+        const arrowZ = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 0), 1.2, 0x1e90ff, 0.25, 0.1);
+        if (opacidad < 1) {
+            [arrowX, arrowY, arrowZ].forEach(a => {
+                a.line.material.transparent = true;
+                a.line.material.opacity = 0.45;
+                a.cone.material.transparent = true;
+                a.cone.material.opacity = 0.45;
+            });
+        }
+        grupo.add(arrowX, arrowY, arrowZ);
+        return grupo;
+    }
+
+    function inicializarEscenaNivel3D() {
+        const container = document.getElementById("nivel3d-container");
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0e1224);
+
+        const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+        camera.position.set(5, 4, 7);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.minDistance = 2;
+        controls.maxDistance = 15;
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+
+        const gridHelper = new THREE.GridHelper(12, 12, 0x3f51b5, 0x1a237e);
+        gridHelper.position.y = -2;
+        scene.add(gridHelper);
+
+        // Cubo "nivelado" (marco del cuerpo): referencia fija, sin rotación extra
+        const cuboNivelado = crearCuboSensorSimple(0xe2e8f0, 0.9);
+        scene.add(cuboNivelado);
+
+        // Cubo "crudo" (orientación real de montaje): se anima con el slider
+        const cuboCrudo = crearCuboSensorSimple(0x94a3b8, 0.4);
+        scene.add(cuboCrudo);
+
+        // Eje de rotación k: línea punteada que atraviesa el origen
+        const ejeKGeom = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)
+        ]);
+        const ejeKMat = new THREE.LineDashedMaterial({ color: 0x22d3ee, dashSize: 0.2, gapSize: 0.12, linewidth: 2 });
+        const ejeKLinea = new THREE.Line(ejeKGeom, ejeKMat);
+        scene.add(ejeKLinea);
+
+        // Flecha de la gravedad medida (fija, no se anima con el slider)
+        const flechaGravedad = new THREE.ArrowHelper(
+            new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 0), 2.2, 0xf59e0b, 0.35, 0.15
+        );
+        scene.add(flechaGravedad);
+
+        function animar() {
+            requestAnimationFrame(animar);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animar();
+
+        nivel3dSceneRefs = { scene, camera, renderer, controls, container, cuboCrudo, cuboNivelado, ejeKLinea, flechaGravedad };
+        nivel3dInicializado = true;
+    }
+
+    // Reconstruye las rotaciones (quaternion "crudo" <-> "nivelado") y los
+    // vectores fijos (eje k, gravedad medida) a partir de los datos del backend
+    function actualizarEscenaNivel3D(datos) {
+        if (!nivel3dSceneRefs) return;
+        const { ejeKLinea, flechaGravedad } = nivel3dSceneRefs;
+
+        const ejeMundo = sensorAMundo(datos.eje_k).normalize();
+        const thetaRad = datos.theta_deg * Math.PI / 180;
+
+        // qCorreccion equivale a la rotacion R actuando sobre vectores medidos;
+        // su inversa representa la inclinacion FISICA real del montaje del sensor
+        const qCorreccion = new THREE.Quaternion().setFromAxisAngle(ejeMundo, thetaRad);
+        nivel3dSceneRefs.qCrudo = qCorreccion.clone().invert();
+        nivel3dSceneRefs.qNivelado = new THREE.Quaternion(); // identidad
+
+        const puntos = [ejeMundo.clone().multiplyScalar(-3), ejeMundo.clone().multiplyScalar(3)];
+        ejeKLinea.geometry.setFromPoints(puntos);
+        ejeKLinea.computeLineDistances();
+
+        const uMundo = sensorAMundo(datos.g_promedio_calibrado_ms2).normalize();
+        flechaGravedad.setDirection(uMundo);
+
+        aplicarProgresoNivel3D(parseInt(nivel3dSlider.value, 10));
+    }
+
+    function aplicarProgresoNivel3D(porcentaje) {
+        nivel3dPorcentaje.innerText = `${porcentaje}%`;
+        if (!nivel3dSceneRefs || !nivel3dSceneRefs.qCrudo) return;
+        const t = porcentaje / 100;
+        nivel3dSceneRefs.cuboCrudo.quaternion.slerpQuaternions(nivel3dSceneRefs.qCrudo, nivel3dSceneRefs.qNivelado, t);
+    }
+
+    function pintarDatosNivel3D(datos) {
+        nivel3dVacio.classList.add("hidden");
+        nivel3dDatosDiv.classList.remove("hidden");
+        nivel3dBadge.innerText = "Nivelación calculada";
+        nivel3dBadge.className = "sensor-mode-badge live";
+
+        nivel3dTablaComparacion.innerHTML = `
+            <tr><th>Cantidad</th><th>Antes</th><th>Después</th></tr>
+            <tr><td>Roll</td><td>${datos.roll_antes_deg.toFixed(2)}°</td><td>${datos.roll_deg.toFixed(2)}°</td></tr>
+            <tr><td>Pitch</td><td>${datos.pitch_antes_deg.toFixed(2)}°</td><td>${datos.pitch_deg.toFixed(2)}°</td></tr>
+            <tr><td>Gravedad (m/s²)</td>
+                <td>${datos.g_promedio_calibrado_ms2.map(v => v.toFixed(3)).join(", ")}</td>
+                <td>${datos.g_rotado_ms2.map(v => v.toFixed(3)).join(", ")}</td></tr>
+        `;
+
+        nivel3dTablaEje.innerHTML = `
+            <tr><td>Eje k</td><td>${datos.eje_k.map(v => v.toFixed(4)).join(", ")}</td></tr>
+            <tr><td>Ángulo θ</td><td>${datos.theta_deg.toFixed(2)}°</td></tr>
+            <tr><td>|g|</td><td>${datos.magnitud_g_ms2.toFixed(4)} m/s²</td></tr>
+        `;
+
+        let filasR = "";
+        for (let i = 0; i < 3; i++) {
+            filasR += "<tr>" + datos.R[i].map(v => `<td>${formatearNumero(v)}</td>`).join("") + "</tr>";
+        }
+        nivel3dTablaR.innerHTML = filasR;
+    }
+
+    function cargarNivel3D() {
+        fetch("/api/nivelacion/estado")
+            .then(res => res.json())
+            .then(datos => {
+                if (!datos.tiene_nivelacion) {
+                    nivel3dVacio.classList.remove("hidden");
+                    nivel3dDatosDiv.classList.add("hidden");
+                    nivel3dBadge.innerText = "Sin nivelación calculada";
+                    nivel3dBadge.className = "sensor-mode-badge";
+                    return;
+                }
+                nivel3dSlider.value = 0;
+                pintarDatosNivel3D(datos);
+                actualizarEscenaNivel3D(datos);
+            })
+            .catch(() => {});
+    }
+
+    nivel3dSlider.addEventListener("input", () => aplicarProgresoNivel3D(parseInt(nivel3dSlider.value, 10)));
+
+    btnNivel3dReset.addEventListener("click", () => {
+        nivel3dSlider.value = 0;
+        aplicarProgresoNivel3D(0);
+    });
+
+    btnNivel3dPlay.addEventListener("click", () => {
+        if (nivel3dAnimando) return;
+        nivel3dAnimando = true;
+        const valorActual = parseInt(nivel3dSlider.value, 10);
+        const inicio = valorActual >= 100 ? 0 : valorActual;
+        nivel3dSlider.value = inicio;
+        aplicarProgresoNivel3D(inicio);
+
+        const duracionMs = 1500;
+        const t0 = performance.now();
+        function paso(ahora) {
+            const frac = Math.min(1, (ahora - t0) / duracionMs);
+            const valor = Math.round(inicio + frac * (100 - inicio));
+            nivel3dSlider.value = valor;
+            aplicarProgresoNivel3D(valor);
+            if (frac < 1) {
+                requestAnimationFrame(paso);
+            } else {
+                nivel3dAnimando = false;
+            }
+        }
+        requestAnimationFrame(paso);
+    });
 
     // === Controladores de Eventos del Sensor ===
     btnConnect.addEventListener("click", () => {

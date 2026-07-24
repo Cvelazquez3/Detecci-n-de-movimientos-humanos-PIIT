@@ -50,6 +50,9 @@
                 <button class="nav-btn" data-tab="calibracion">
                     <i class="fa-solid fa-crosshairs"></i> Calibración
                 </button>
+                <button class="nav-btn" data-tab="nivelacion3d">
+                    <i class="fa-solid fa-cube"></i> Nivelación 3D
+                </button>
             </nav>
 
             <!-- Conexión y Control del Sensor -->
@@ -518,6 +521,69 @@
                             iniciales calculados deben salir ≈ 0° por construcción.
                         </p>
                         <table class="calib-matrix-table" id="nivel-verificacion-tabla"></table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================================================
+                 Pestaña: Comparación 3D de la Nivelación de Montaje
+                 ============================================================ -->
+            <section id="tab-nivelacion3d" class="tab-content">
+                <div class="grid-layout">
+                    <div class="card col-8">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-cube text-accent"></i> Comparación 3D: Antes vs. Después de Rodrigues</h3>
+                            <div class="sensor-mode-badge" id="nivel3d-badge">Sin nivelación calculada</div>
+                        </div>
+                        <p class="description">
+                            El cubo tenue muestra cómo está <strong>realmente montado</strong> el sensor (tal como
+                            detecta la gravedad); el cubo sólido es el marco del cuerpo ya <strong>nivelado</strong>.
+                            Arrastra el control o dale a "Reproducir" para ver la rotación <strong>R</strong> que
+                            los conecta.
+                        </p>
+                        <div class="canvas-3d-container" id="nivel3d-container">
+                            <div class="three-legend" id="nivel3d-legend">
+                                <div class="axis-legend"><span class="color-box" style="background:#94a3b8"></span>Cubo tenue = orientación cruda</div>
+                                <div class="axis-legend"><span class="color-box" style="background:#e2e8f0"></span>Cubo sólido = marco nivelado</div>
+                                <div class="axis-legend"><span class="color-box" style="background:#f59e0b"></span>Gravedad medida</div>
+                                <div class="axis-legend"><span class="color-box" style="background:#22d3ee"></span>Eje de rotación k</div>
+                            </div>
+                        </div>
+                        <div class="nivel3d-controls">
+                            <button type="button" id="btn-nivel3d-reset" class="btn-icon" title="Ir al estado crudo (0%)">
+                                <i class="fa-solid fa-backward-step"></i>
+                            </button>
+                            <button type="button" id="btn-nivel3d-play" class="btn-icon" title="Reproducir la corrección">
+                                <i class="fa-solid fa-play"></i>
+                            </button>
+                            <div class="nivel3d-slider-wrapper">
+                                <span>Crudo</span>
+                                <input type="range" id="nivel3d-slider" min="0" max="100" value="0">
+                                <span>Nivelado</span>
+                            </div>
+                            <span class="nivel3d-porcentaje" id="nivel3d-porcentaje">0%</span>
+                        </div>
+                    </div>
+
+                    <div class="card col-4">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-table-cells text-primary"></i> Valores de la Rotación</h3>
+                        </div>
+                        <p class="description" id="nivel3d-vacio">
+                            Aún no se ha calculado la nivelación. Ve a la pestaña <strong>Calibración</strong>,
+                            sube un CSV con el sensor en reposo y da clic en "Calcular R".
+                        </p>
+                        <div id="nivel3d-datos" class="hidden">
+                            <table class="calib-matrix-table" id="nivel3d-tabla-comparacion"></table>
+                            <div class="calib-bias-header">
+                                <h4>Eje k y ángulo &theta; (Rodrigues)</h4>
+                            </div>
+                            <table class="calib-matrix-table" id="nivel3d-tabla-eje"></table>
+                            <div class="calib-bias-header">
+                                <h4>Matriz de rotación R</h4>
+                            </div>
+                            <table class="calib-matrix-table" id="nivel3d-tabla-r"></table>
+                        </div>
                     </div>
                 </div>
             </section>

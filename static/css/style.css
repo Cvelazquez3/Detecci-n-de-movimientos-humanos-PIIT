@@ -1174,3 +1174,54 @@ body {
 .calib-toggle-switch input:checked + .calib-toggle-slider::before {
     transform: translateX(18px);
 }
+
+/* ==========================================================================
+   Pestaña de comparación 3D de la nivelación (Rodrigues)
+   ========================================================================== */
+.nivel3d-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--surface-soft);
+    border-radius: 10px;
+    padding: 10px 16px;
+}
+
+.nivel3d-slider-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-grow: 1;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.nivel3d-slider-wrapper input[type="range"] {
+    flex-grow: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--surface-strong);
+    outline: none;
+    cursor: pointer;
+}
+
+.nivel3d-slider-wrapper input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 5px var(--accent);
+}
+
+.nivel3d-porcentaje {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    width: 42px;
+    text-align: right;
+}

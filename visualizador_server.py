@@ -855,20 +855,24 @@ def _rodrigues(k, theta):
 def _calcular_R_nivelacion(g_prom):
     """
     g_prom: vector 3 de la aceleracion promedio YA CALIBRADA (m/s^2), con el
-    sensor en reposo. Devuelve R tal que R @ (g_prom/||g_prom||) ~= (0,0,1).
+    sensor en reposo. Devuelve (R, eje, theta) donde R @ (g_prom/||g_prom||)
+    ~= (0,0,1), eje es el vector unitario k y theta el angulo en radianes
+    (ver seccion 1.2 del documento de nivelacion / formula de Rodrigues).
     """
     norma = np.linalg.norm(g_prom)
     if norma < 1e-9:
         raise ValueError("La aceleracion promedio es practicamente cero; no se puede nivelar con estos datos.")
     u = g_prom / norma
     v = np.array([0.0, 0.0, 1.0])
-    eje = np.cross(u, v)
-    s = np.linalg.norm(eje)
+    eje_cruz = np.cross(u, v)
+    s = np.linalg.norm(eje_cruz)
     c = float(np.dot(u, v))
     if s < 1e-12:
         if c > 0:
             # Vectores ya alineados (theta ~ 0)
             R = np.eye(3)
+            eje = np.array([1.0, 0.0, 0.0])  # arbitrario: el angulo es 0, el eje no importa
+            theta = 0.0
         else:
             # Antiparalelos (theta ~ 180): girar 180 grados alrededor de
             # cualquier eje perpendicular a u (ver seccion 1.4 del documento)
@@ -876,15 +880,30 @@ def _calcular_R_nivelacion(g_prom):
             eje_perp = np.cross(u, perp)
             eje_perp = eje_perp / np.linalg.norm(eje_perp)
             R = _rodrigues(eje_perp, math.pi)
+            eje = eje_perp
+            theta = math.pi
     else:
         theta = math.atan2(s, c)
-        R = _rodrigues(eje / s, theta)
-    return R
+        eje = eje_cruz / s
+        R = _rodrigues(eje, theta)
+    return R, eje, theta
 
 
-def _guardar_nivelacion_en_disco(R):
+def _guardar_nivelacion_en_disco(datos):
+    payload = {
+        "R": datos["R"].tolist(),
+        "eje": datos["eje"].tolist(),
+        "theta_rad": datos["theta_rad"],
+        "g_prom": datos["g_prom"].tolist(),
+        "g_rotado": datos["g_rotado"].tolist(),
+        "roll_antes_deg": datos["roll_antes_deg"],
+        "pitch_antes_deg": datos["pitch_antes_deg"],
+        "roll_despues_deg": datos["roll_despues_deg"],
+        "pitch_despues_deg": datos["pitch_despues_deg"],
+        "magnitud_g_ms2": datos["magnitud_g_ms2"],
+    }
     with open(NIVELACION_JSON_PATH, "w", encoding="utf-8") as f:
-        json.dump({"R": R.tolist()}, f, indent=2, ensure_ascii=False)
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def _cargar_nivelacion_de_disco():
@@ -893,8 +912,21 @@ def _cargar_nivelacion_de_disco():
     try:
         with open(NIVELACION_JSON_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return {"R": np.array(data["R"])}
+        return {
+            "R": np.array(data["R"]),
+            "eje": np.array(data["eje"]),
+            "theta_rad": data["theta_rad"],
+            "g_prom": np.array(data["g_prom"]),
+            "g_rotado": np.array(data["g_rotado"]),
+            "roll_antes_deg": data["roll_antes_deg"],
+            "pitch_antes_deg": data["pitch_antes_deg"],
+            "roll_despues_deg": data["roll_despues_deg"],
+            "pitch_despues_deg": data["pitch_despues_deg"],
+            "magnitud_g_ms2": data["magnitud_g_ms2"],
+        }
     except Exception as e:
+        # Si el archivo es de un formato anterior (solo tenia "R"), se ignora
+        # y hay que volver a procesar la nivelacion desde la pestaña Calibracion.
         print(f"[NIVEL] No se pudo cargar {NIVELACION_JSON_PATH}: {e}")
         return None
 
@@ -969,29 +1001,47 @@ def nivelacion_procesar():
     g_prom = C @ promedio_crudo_g + b_a  # m/s^2, aceleracion promedio calibrada
 
     try:
-        R = _calcular_R_nivelacion(g_prom)
+        R, eje, theta = _calcular_R_nivelacion(g_prom)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
     g_rotado = R @ g_prom
     magnitud = float(np.linalg.norm(g_prom))
 
-    # Chequeos descritos en la seccion 1.5 del documento: roll/pitch iniciales
-    # calculados a partir de la gravedad ya rotada deben salir ~0 grados.
+    # Chequeos descritos en la seccion 1.5 del documento: roll/pitch ANTES
+    # (con la gravedad cruda calibrada, sin nivelar) y DESPUES (ya rotada,
+    # deben salir ~0 grados por construccion) para poder comparar.
+    roll_antes_deg = math.degrees(math.atan2(g_prom[1], g_prom[2]))
+    pitch_antes_deg = math.degrees(math.atan2(-g_prom[0], math.sqrt(g_prom[1] ** 2 + g_prom[2] ** 2)))
     roll_deg = math.degrees(math.atan2(g_rotado[1], g_rotado[2]))
     pitch_deg = math.degrees(math.atan2(-g_rotado[0], math.sqrt(g_rotado[1] ** 2 + g_rotado[2] ** 2)))
 
-    nivelacion_activa = {"R": R}
-    _guardar_nivelacion_en_disco(R)
+    nivelacion_activa = {
+        "R": R,
+        "eje": eje,
+        "theta_rad": theta,
+        "g_prom": g_prom,
+        "g_rotado": g_rotado,
+        "roll_antes_deg": roll_antes_deg,
+        "pitch_antes_deg": pitch_antes_deg,
+        "roll_despues_deg": roll_deg,
+        "pitch_despues_deg": pitch_deg,
+        "magnitud_g_ms2": magnitud,
+    }
+    _guardar_nivelacion_en_disco(nivelacion_activa)
 
     return jsonify({
         "status": "ok",
         "R": R.tolist(),
+        "eje_k": eje.tolist(),
+        "theta_deg": math.degrees(theta),
         "muestras_usadas": n_muestras,
         "promedio_crudo_g": promedio_crudo_g.tolist(),
         "g_promedio_calibrado_ms2": g_prom.tolist(),
         "g_rotado_ms2": g_rotado.tolist(),
         "magnitud_g_ms2": magnitud,
+        "roll_antes_deg": roll_antes_deg,
+        "pitch_antes_deg": pitch_antes_deg,
         "roll_deg": roll_deg,
         "pitch_deg": pitch_deg,
     })
@@ -1013,10 +1063,24 @@ def nivelacion_aplicar():
 
 @app.route('/api/nivelacion/estado')
 def nivelacion_estado():
+    if nivelacion_activa is None:
+        return jsonify({
+            "tiene_nivelacion": False,
+            "aplicar_nivelacion_en_vivo": aplicar_nivelacion_en_vivo,
+        })
     return jsonify({
-        "tiene_nivelacion": nivelacion_activa is not None,
+        "tiene_nivelacion": True,
         "aplicar_nivelacion_en_vivo": aplicar_nivelacion_en_vivo,
-        "R": nivelacion_activa["R"].tolist() if nivelacion_activa else None,
+        "R": nivelacion_activa["R"].tolist(),
+        "eje_k": nivelacion_activa["eje"].tolist(),
+        "theta_deg": math.degrees(nivelacion_activa["theta_rad"]),
+        "g_promedio_calibrado_ms2": nivelacion_activa["g_prom"].tolist(),
+        "g_rotado_ms2": nivelacion_activa["g_rotado"].tolist(),
+        "roll_antes_deg": nivelacion_activa["roll_antes_deg"],
+        "pitch_antes_deg": nivelacion_activa["pitch_antes_deg"],
+        "roll_deg": nivelacion_activa["roll_despues_deg"],
+        "pitch_deg": nivelacion_activa["pitch_despues_deg"],
+        "magnitud_g_ms2": nivelacion_activa["magnitud_g_ms2"],
     })
 
 
