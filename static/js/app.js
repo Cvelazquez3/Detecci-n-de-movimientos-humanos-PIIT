@@ -183,7 +183,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // === Configuración de Three.js ===
     const threeContainer = document.getElementById("three-container");
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0e1224);
+    scene.background = new THREE.Color(0xd6e9fb);
     
     const camera = new THREE.PerspectiveCamera(45, threeContainer.clientWidth / threeContainer.clientHeight, 0.1, 100);
     camera.position.set(5, 4, 7);
@@ -287,13 +287,14 @@ document.addEventListener("DOMContentLoaded", () => {
     );
     sensorBody.add(arrowZ);
 
-    // Flecha de Aceleración Total en el marco mundial (Blanco)
+    // Flecha de Aceleración Total en el marco mundial (gris oscuro, para que
+    // se distinga bien sobre el fondo azul claro del visor 3D)
     // En reposo, apunta hacia arriba (+Y del mundo) reflejando la fuerza normal
     const gravityArrow = new THREE.ArrowHelper(
         new THREE.Vector3(0, 1, 0),
         new THREE.Vector3(0, 0, 0),
         2.0,
-        0xffffff,
+        0x1e293b,
         0.3,
         0.12
     );
@@ -1134,7 +1135,7 @@ document.addEventListener("DOMContentLoaded", () => {
     function inicializarEscenaNivel3D() {
         const container = document.getElementById("nivel3d-container");
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x0e1224);
+        scene.background = new THREE.Color(0xd6e9fb);
 
         const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
         camera.position.set(5, 4, 7);
@@ -1161,11 +1162,11 @@ document.addEventListener("DOMContentLoaded", () => {
         scene.add(gridHelper);
 
         // Cubo "nivelado" (marco del cuerpo): referencia fija, sin rotación extra
-        const cuboNivelado = crearCuboSensorSimple(0xe2e8f0, 0.9);
+        const cuboNivelado = crearCuboSensorSimple(0x1e293b, 0.95);
         scene.add(cuboNivelado);
 
         // Cubo "crudo" (orientación real de montaje): se anima con el slider
-        const cuboCrudo = crearCuboSensorSimple(0x94a3b8, 0.4);
+        const cuboCrudo = crearCuboSensorSimple(0x64748b, 0.45);
         scene.add(cuboCrudo);
 
         // Eje de rotación k: línea punteada que atraviesa el origen
